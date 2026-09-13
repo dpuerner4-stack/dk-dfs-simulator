@@ -10,45 +10,177 @@ from email.mime.multipart import MIMEMultipart
 
 st.set_page_config(page_title="DraftKings Optimizer", layout="wide")
 
-# --- EMAIL DISPATCH FUNCTION ---
+# --- MODERN EMAIL TEMPLATE GENERATOR ---
+def generate_email_html(optimal_roster, sim_results, matchups_df):
+    pos_colors = {
+        "QB": "#e06666",
+        "RB": "#6fa8dc",
+        "WR": "#ffd966",
+        "TE": "#93c47d",
+        "DST": "#8e7cc3"
+    }
+
+    # Format Slate Matchup Badges
+    matchup_badges = ""
+    if isinstance(matchups_df, pd.DataFrame) and not matchups_df.empty:
+        for _, row in matchups_df.iterrows():
+            matchup_badges += f"""
+            <span style="display: inline-block; background-color: #f1f3f5; border: 1px solid #dee2e6; border-radius: 6px; padding: 6px 12px; margin: 4px; font-weight: 600; font-size: 13px; color: #343a40;">
+                🏈 {row['matchup']} &nbsp;<span style="font-weight: 400; color: #6c757d;">({row['start_time']})</span>
+            </span>
+            """
+    else:
+        matchup_badges = "<span style='color: #6c757d; font-size: 13px;'>No specific slate games found.</span>"
+
+    # Lineup Rows Builder
+    lineup_rows = ""
+    for idx, row in optimal_roster.iterrows():
+        bg = "#ffffff" if idx % 2 == 0 else "#f8f9fa"
+        pos = row.get("position", "")
+        badge_color = pos_colors.get(pos, "#adb5bd")
+        text_color = "#000000" if pos in ["WR", "RB", "TE"] else "#ffffff"
+        
+        lineup_rows += f"""
+        <tr style="background-color: {bg}; border-bottom: 1px solid #e9ecef; text-align: left; font-size: 13px;">
+            <td style="padding: 10px 12px;"><span style="background-color: {badge_color}; color: {text_color}; font-weight: 700; border-radius: 4px; padding: 3px 8px; font-size: 11px;">{pos}</span></td>
+            <td style="padding: 10px 12px; font-weight: 600; color: #212529;">{row.get('name', '')}</td>
+            <td style="padding: 10px 12px; color: #495057;">{row.get('team', '')}</td>
+            <td style="padding: 10px 12px; color: #6c757d; font-size: 12px;">{row.get('matchup', '')}</td>
+            <td style="padding: 10px 12px; font-weight: 600; color: #198754;">${int(row.get('salary', 0)):,}</td>
+            <td style="padding: 10px 12px; font-weight: 600;">{row.get('proj_fpts', 0):.1f}</td>
+            <td style="padding: 10px 12px; color: #0d6efd; font-weight: 600;">{row.get('optimal_%', 0):.2f}%</td>
+            <td style="padding: 10px 12px; font-weight: 600;">{row.get('leverage', 0):.2f}x</td>
+        </tr>
+        """
+
+    # Top Leverage Exposures Builder
+    top_exposures = sim_results.head(10)
+    exposure_rows = ""
+    for idx, row in top_exposures.reset_index().iterrows():
+        bg = "#ffffff" if idx % 2 == 0 else "#f8f9fa"
+        pos = row.get("position", "")
+        badge_color = pos_colors.get(pos, "#adb5bd")
+        text_color = "#000000" if pos in ["WR", "RB", "TE"] else "#ffffff"
+
+        exposure_rows += f"""
+        <tr style="background-color: {bg}; border-bottom: 1px solid #e9ecef; text-align: left; font-size: 13px;">
+            <td style="padding: 10px 12px;"><span style="background-color: {badge_color}; color: {text_color}; font-weight: 700; border-radius: 4px; padding: 3px 8px; font-size: 11px;">{pos}</span></td>
+            <td style="padding: 10px 12px; font-weight: 600; color: #212529;">{row.get('name', '')}</td>
+            <td style="padding: 10px 12px; color: #495057;">{row.get('team', '')}</td>
+            <td style="padding: 10px 12px; color: #6c757d; font-size: 12px;">{row.get('matchup', '')}</td>
+            <td style="padding: 10px 12px; font-weight: 600; color: #198754;">${int(row.get('salary', 0)):,}</td>
+            <td style="padding: 10px 12px;">{row.get('proj_fpts', 0):.1f}</td>
+            <td style="padding: 10px 12px; color: #0d6efd; font-weight: 700;">{row.get('optimal_%', 0):.2f}%</td>
+            <td style="padding: 10px 12px; font-weight: 700; color: #d63384;">{row.get('leverage', 0):.2f}x</td>
+        </tr>
+        """
+
+    total_sal = int(optimal_roster['salary'].sum())
+    rem_sal = 50000 - total_sal
+    total_proj = optimal_roster['proj_fpts'].sum()
+
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <style>
+            body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f4f6f8; margin: 0; padding: 24px; color: #212529; }}
+            .container {{ max-width: 680px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.06); overflow: hidden; border: 1px solid #e9ecef; }}
+            .header {{ background: linear-gradient(135deg, #1e3a8a, #0b5394); padding: 28px 24px; color: #ffffff; }}
+            .content {{ padding: 24px; }}
+            .kpi-row {{ display: table; width: 100%; margin: 18px 0; border-collapse: separate; border-spacing: 8px 0; }}
+            .kpi-card {{ display: table-cell; width: 33.33%; background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; padding: 12px 14px; text-align: center; }}
+            .kpi-label {{ font-size: 11px; text-transform: uppercase; color: #6c757d; font-weight: 700; letter-spacing: 0.5px; margin-bottom: 4px; }}
+            .kpi-val {{ font-size: 20px; font-weight: 800; color: #212529; }}
+            .table-wrap {{ width: 100%; border-collapse: collapse; margin-top: 10px; margin-bottom: 24px; border-radius: 8px; overflow: hidden; border: 1px solid #dee2e6; }}
+            th {{ background-color: #f1f3f5; color: #495057; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; padding: 10px 12px; border-bottom: 2px solid #dee2e6; text-align: left; }}
+            h3 {{ font-size: 16px; margin: 20px 0 8px 0; color: #1e3a8a; display: flex; align-items: center; }}
+            .footer {{ background-color: #f8f9fa; border-top: 1px solid #e9ecef; padding: 16px; text-align: center; font-size: 11px; color: #adb5bd; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h2 style="margin: 0 0 6px 0; font-size: 22px; font-weight: 800;">🏈 DraftKings Optimizer Digest</h2>
+                <div style="font-size: 13px; opacity: 0.85;">Generated on {time.strftime('%A, %b %d, %Y at %I:%M %p')}</div>
+            </div>
+            <div class="content">
+                <div style="margin-bottom: 16px;">
+                    <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; color: #6c757d; margin-bottom: 6px;">Included Matchups</div>
+                    {matchup_badges}
+                </div>
+
+                <div class="kpi-row">
+                    <div class="kpi-card">
+                        <div class="kpi-label">Lineup Salary</div>
+                        <div class="kpi-val" style="color: #198754;">${total_sal:,}</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-label">Remaining Cap</div>
+                        <div class="kpi-val" style="color: #0d6efd;">${rem_sal:,}</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-label">Projected Fpts</div>
+                        <div class="kpi-val">{total_proj:.2f}</div>
+                    </div>
+                </div>
+
+                <h3>🏆 Optimal Lineup (Max FPPG Constrained)</h3>
+                <table class="table-wrap">
+                    <thead>
+                        <tr>
+                            <th>Pos</th>
+                            <th>Player</th>
+                            <th>Team</th>
+                            <th>Matchup</th>
+                            <th>Salary</th>
+                            <th>Fpts</th>
+                            <th>Opt %</th>
+                            <th>Lev</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {lineup_rows}
+                    </tbody>
+                </table>
+
+                <h3>⚡ Top 10 Simulated Target Exposures</h3>
+                <table class="table-wrap">
+                    <thead>
+                        <tr>
+                            <th>Pos</th>
+                            <th>Player</th>
+                            <th>Team</th>
+                            <th>Matchup</th>
+                            <th>Salary</th>
+                            <th>Fpts</th>
+                            <th>Opt %</th>
+                            <th>Lev</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {exposure_rows}
+                    </tbody>
+                </table>
+            </div>
+            <div class="footer">
+                Automated report via Streamlit & GitHub Actions • Monte Carlo (17,500 iterations)
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return html
+
 def send_email_report(optimal_roster, sim_results, matchups_df, sender_email, sender_password, recipient_email):
     try:
         msg = MIMEMultipart("alternative")
-        msg["Subject"] = f"🏈 DraftKings Slate Report & Optimal Lineup ({time.strftime('%b %d, %Y')})"
+        msg["Subject"] = f"🏈 DraftKings Lineup Alert: {optimal_roster['proj_fpts'].sum():.1f} FPTS (${int(optimal_roster['salary'].sum()):,})"
         msg["From"] = sender_email
         msg["To"] = recipient_email
 
-        cols_wanted = ["position", "name", "team", "matchup", "salary", "proj_fpts", "optimal_%", "leverage"]
-        safe_roster_cols = [c for c in cols_wanted if c in optimal_roster.columns]
-        safe_sim_cols = [c for c in cols_wanted if c in sim_results.columns]
-
-        top_exposures = sim_results.head(10)[safe_sim_cols]
-        roster_view = optimal_roster[safe_roster_cols]
-        
-        matchups_html = ""
-        if isinstance(matchups_df, pd.DataFrame) and not matchups_df.empty:
-            matchups_html = f"""
-            <h3>🏟️ Included Slate Games</h3>
-            {matchups_df.to_html(index=False, border=1)}
-            """
-
-        html = f"""
-        <html>
-          <body style="font-family: Arial, sans-serif; color: #222; line-height: 1.4;">
-            <h2 style="color: #0b5394; margin-bottom: 4px;">DraftKings Slate & 17,500 Simulation Report</h2>
-            <p style="color: #666; font-size: 13px;">Generated on {time.strftime('%A, %b %d, %Y at %I:%M %p')}</p>
-            
-            {matchups_html}
-
-            <h3>🏆 Optimal Lineup</h3>
-            <p><strong>Total Salary:</strong> ${optimal_roster['salary'].sum():,} / $50,000 | <strong>Projected Points:</strong> {optimal_roster['proj_fpts'].sum():.2f}</p>
-            {roster_view.to_html(index=False, border=1)}
-            
-            <h3>⚡ Top 10 Simulated Target Exposures</h3>
-            {top_exposures.to_html(index=False, border=1)}
-          </body>
-        </html>
-        """
+        html = generate_email_html(optimal_roster, sim_results, matchups_df)
         msg.attach(MIMEText(html, "html"))
 
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
