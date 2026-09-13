@@ -18,14 +18,18 @@ def send_email_report(optimal_roster, sim_results, matchups_df, sender_email, se
         msg["From"] = sender_email
         msg["To"] = recipient_email
 
-        top_exposures = sim_results.head(10)[["position", "name", "team", "matchup", "salary", "proj_fpts", "optimal_%", "leverage"]]
-        roster_view = optimal_roster[["position", "name", "team", "matchup", "salary", "proj_fpts", "optimal_%", "leverage"]]
+        cols_wanted = ["position", "name", "team", "matchup", "salary", "proj_fpts", "optimal_%", "leverage"]
+        safe_roster_cols = [c for c in cols_wanted if c in optimal_roster.columns]
+        safe_sim_cols = [c for c in cols_wanted if c in sim_results.columns]
+
+        top_exposures = sim_results.head(10)[safe_sim_cols]
+        roster_view = optimal_roster[safe_roster_cols]
         
         matchups_html = ""
-        if not matchups_df.empty:
+        if isinstance(matchups_df, pd.DataFrame) and not matchups_df.empty:
             matchups_html = f"""
             <h3>🏟️ Included Slate Games</h3>
-            {matchups_df[['matchup', 'start_time']].to_html(index=False, border=1)}
+            {matchups_df.to_html(index=False, border=1)}
             """
 
         html = f"""
@@ -93,17 +97,12 @@ def fetch_player_pool(draft_group_id):
     headers = {"User-Agent": "Mozilla/5.0"}
     res = requests.get(url, headers=headers, timeout=10).json()
     
-    # Extract Games/Competitions
     competitions = res.get("competitions", [])
     games = []
     for comp in competitions:
         name = comp.get("name", "")
         start = comp.get("startTime", "")
-        if start:
-            # Format time display cleanly
-            start_str = start.replace("T", " ").split(".")[0]
-        else:
-            start_str = "TBD"
+        start_str = start.replace("T", " ").split(".")[0] if start else "TBD"
         games.append({"matchup": name, "start_time": start_str})
     matchups_df = pd.DataFrame(games)
 
@@ -250,7 +249,7 @@ st.title("🏈 DraftKings Slate Scanner & Optimizer")
 
 col_btn, col_info = st.columns([1, 3])
 with col_btn:
-    run_clicked = st.button("🚀 Run Live 17,500 Simulation", use_container_width=True, type="primary")
+    run_clicked = st.button("🚀 Run Live 17,500 Simulation", width="stretch", type="primary")
 
 if run_clicked:
     with st.spinner("Connecting to DraftKings API & solving slates..."):
@@ -274,12 +273,14 @@ if run_clicked:
                 if ok:
                     st.success("Simulation complete & email report delivered!")
                 else:
-                    st.warning(f"Simulation complete, but {msg}")
+                    st.error(f"Email error: {msg}")
             else:
                 st.success(f"Simulation complete in {time.time() - t0:.1f}s!")
 
 # --- DASHBOARD TABS ---
 tab1, tab2, tab3, tab4 = st.tabs(["🏆 Weekly Optimal Lineup", "🏟️ Slate Games", "⚡ Simulated Exposures", "🎯 Target Contests"])
+
+cols_to_display = ["position", "name", "team", "matchup", "salary", "proj_fpts", "optimal_%", "leverage"]
 
 with tab1:
     st.header("Weekly Optimal Lineup")
@@ -289,14 +290,15 @@ with tab1:
         c1.metric("Total Salary", f"${roster['salary'].sum():,} / $50,000")
         c2.metric("Projected Points", f"{roster['proj_fpts'].sum():.2f}")
         c3.metric("Last Run", st.session_state.get("last_run", "N/A"))
-        st.dataframe(roster[["position", "name", "team", "matchup", "salary", "proj_fpts", "optimal_%", "leverage"]], use_container_width=True)
+        valid_cols = [c for c in cols_to_display if c in roster.columns]
+        st.dataframe(roster[valid_cols], width="stretch")
     else:
         st.info("Tap '🚀 Run Live 17,500 Simulation' to generate the optimal lineup.")
 
 with tab2:
     st.header("🏟️ Games on this Slate")
-    if "matchups" in st.session_state and not st.session_state["matchups"].empty:
-        st.dataframe(st.session_state["matchups"], use_container_width=True)
+    if "matchups" in st.session_state and isinstance(st.session_state["matchups"], pd.DataFrame) and not st.session_state["matchups"].empty:
+        st.dataframe(st.session_state["matchups"], width="stretch")
     else:
         st.info("Game matchups will appear after running the simulation.")
 
@@ -309,14 +311,15 @@ with tab3:
             min_opt = st.slider("Minimum Optimal %", 0.0, 40.0, 2.0, step=0.5)
         with col2:
             pos_filter = st.multiselect("Filter Positions", ["QB", "RB", "WR", "TE", "DST"], default=["QB", "RB", "WR", "TE", "DST"])
+        valid_cols = [c for c in cols_to_display if c in df_sim.columns]
         filtered = df_sim[(df_sim["optimal_%"] >= min_opt) & (df_sim["position"].isin(pos_filter))]
-        st.dataframe(filtered[["position", "name", "team", "matchup", "salary", "proj_fpts", "optimal_%", "leverage"]], use_container_width=True)
+        st.dataframe(filtered[valid_cols], width="stretch")
     else:
         st.warning("No simulation data found.")
 
 with tab4:
     st.header("Target Contests ($0.25 - $30.00)")
     if "contests" in st.session_state:
-        st.dataframe(st.session_state["contests"][["name", "entry_fee", "prize_pool", "multiplier"]], use_container_width=True)
+        st.dataframe(st.session_state["contests"][["name", "entry_fee", "prize_pool", "multiplier"]], width="stretch")
     else:
         st.info("Contest data will load once you run a simulation.")
