@@ -28,13 +28,14 @@ def get_status():
                 return json.load(f)
         except:
             pass
-    return {"running": False, "msg": "Idle", "last_run": "Never"}
+    return {"running": False, "msg": "Idle", "progress": 0, "last_run": "Never"}
 
-def set_status(running, msg, last_run=None):
+def set_status(running, msg, progress=0, last_run=None):
     current = get_status()
     payload = {
         "running": running,
         "msg": msg,
+        "progress": int(progress),
         "last_run": last_run if last_run else current.get("last_run", "Never")
     }
     with open(CACHE_STATUS, "w") as f:
@@ -317,7 +318,7 @@ def run_simulation_pure(df, num_simulations=17500):
     sim_matrix = np.clip(sim_matrix, 0, None).astype(np.float32)
 
     counts = np.zeros(n, dtype=np.int32)
-    batch_size = 500
+    batch_size = 1000
     for b_start in range(0, num_simulations, batch_size):
         b_end = min(b_start + batch_size, num_simulations)
         for s in range(b_start, b_end):
@@ -350,37 +351,42 @@ def run_simulation_pure(df, num_simulations=17500):
                     if x[i].solution_value() > 0.5:
                         counts[i] += 1
 
+        pct = 15 + int((b_end / num_simulations) * 70)
+        set_status(True, f"Simulating {b_end:,} / {num_simulations:,} slates...", progress=pct)
+
     df["optimal_%"] = np.round((counts / num_simulations) * 100, 2)
     df["leverage"] = np.round(df["optimal_%"] / (df["salary"] / 1000), 2)
     return df.sort_values(by="optimal_%", ascending=False)
 
-# --- DETACHED WORKER (IMMUNE TO BROWSER SLEEP) ---
+# --- DETACHED WORKER ---
 def background_task(sender, pw, rec):
     try:
-        set_status(True, "Scanning DraftKings slate...")
+        set_status(True, "Scanning DraftKings contests...", progress=5)
         contests_df, draft_group_id = get_target_slate()
         if contests_df.empty or not draft_group_id:
-            set_status(False, "Failed: No eligible NFL contests found.")
+            set_status(False, "Failed: No eligible NFL contests found.", progress=0)
             return
 
-        set_status(True, "Simulating 17,500 slates in background...")
+        set_status(True, "Downloading player pool & active matchups...", progress=15)
         players_df, matchups_df = fetch_player_pool(draft_group_id)
+
         sim_results = run_simulation_pure(players_df, num_simulations=17500)
+
+        set_status(True, "Solving optimal salary-constrained roster...", progress=88)
         optimal_roster = solve_optimal_lineup(sim_results, "proj_fpts")
 
-        # Save results to disk
         optimal_roster.to_csv(CACHE_ROSTER, index=False)
         sim_results.to_csv(CACHE_SIM, index=False)
         matchups_df.to_csv(CACHE_MATCHUPS, index=False)
         
         run_ts = time.strftime("%Y-%m-%d %I:%M %p")
         if sender and pw and rec:
-            set_status(True, "Sending email report...")
+            set_status(True, "Sending email digest...", progress=94)
             send_email_report(optimal_roster, sim_results, matchups_df, sender, pw, rec)
 
-        set_status(False, "Completed successfully", run_ts)
+        set_status(False, "Completed successfully", progress=100, last_run=run_ts)
     except Exception as e:
-        set_status(False, f"Error: {e}")
+        set_status(False, f"Error: {e}", progress=0)
 
 # --- UI & SIDEBAR ---
 with st.sidebar:
@@ -397,22 +403,24 @@ status = get_status()
 col_btn, col_info = st.columns([1, 2])
 with col_btn:
     if status["running"]:
-        st.button("⏳ Simulation in progress...", width="stretch", disabled=True)
+        st.button("⏳ Solving in background...", width="stretch", disabled=True)
     else:
         if st.button("🚀 Run Live 17,500 Simulation", width="stretch", type="primary"):
             pw = sender_pw if send_email else ""
             t = threading.Thread(target=background_task, args=(sender_email, pw, recipient_email), daemon=True)
             t.start()
-            set_status(True, "Starting detached solver...")
+            set_status(True, "Initializing optimization job...", progress=2)
             st.rerun()
 
 with col_info:
     if status["running"]:
-        st.info(f"🔄 **Server Running:** {status['msg']} *(Safe to close/sleep screen)*")
-        time.sleep(2)
+        curr_pct = status.get("progress", 0)
+        curr_msg = status.get("msg", "Processing...")
+        st.progress(curr_pct, text=f"**{curr_pct}%** — {curr_msg} *(Safe to close/sleep screen)*")
+        time.sleep(1)
         st.rerun()
     else:
-        st.caption(f"Status: **{status['msg']}** | Last completed: **{status['last_run']}**")
+        st.caption(f"Status: **{status.get('msg', 'Idle')}** | Last completed: **{status.get('last_run', 'Never')}**")
 
 # --- DISPLAY TABS ---
 tab1, tab2, tab3 = st.tabs(["🏆 Weekly Optimal Lineup", "🏟️ Slate Games", "⚡ Simulated Exposures"])
