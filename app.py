@@ -7,20 +7,43 @@ import time
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import threading
+import json
+import os
 
 st.set_page_config(page_title="DraftKings Optimizer", layout="wide")
 
+CACHE_DIR = "sim_cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
+CACHE_ROSTER = os.path.join(CACHE_DIR, "latest_roster.csv")
+CACHE_SIM = os.path.join(CACHE_DIR, "latest_sim.csv")
+CACHE_MATCHUPS = os.path.join(CACHE_DIR, "latest_matchups.csv")
+CACHE_STATUS = os.path.join(CACHE_DIR, "status.json")
+
+# --- BACKGROUND THREAD STATUS HELPERS ---
+def get_status():
+    if os.path.exists(CACHE_STATUS):
+        try:
+            with open(CACHE_STATUS, "r") as f:
+                return json.load(f)
+        except:
+            pass
+    return {"running": False, "msg": "Idle", "last_run": "Never"}
+
+def set_status(running, msg, last_run=None):
+    current = get_status()
+    payload = {
+        "running": running,
+        "msg": msg,
+        "last_run": last_run if last_run else current.get("last_run", "Never")
+    }
+    with open(CACHE_STATUS, "w") as f:
+        json.dump(payload, f)
+
 # --- MODERN EMAIL TEMPLATE GENERATOR ---
 def generate_email_html(optimal_roster, sim_results, matchups_df):
-    pos_colors = {
-        "QB": "#e06666",
-        "RB": "#6fa8dc",
-        "WR": "#ffd966",
-        "TE": "#93c47d",
-        "DST": "#8e7cc3"
-    }
+    pos_colors = {"QB": "#e06666", "RB": "#6fa8dc", "WR": "#ffd966", "TE": "#93c47d", "DST": "#8e7cc3"}
 
-    # Format Slate Matchup Badges
     matchup_badges = ""
     if isinstance(matchups_df, pd.DataFrame) and not matchups_df.empty:
         for _, row in matchups_df.iterrows():
@@ -32,7 +55,6 @@ def generate_email_html(optimal_roster, sim_results, matchups_df):
     else:
         matchup_badges = "<span style='color: #6c757d; font-size: 13px;'>No specific slate games found.</span>"
 
-    # Lineup Rows Builder
     lineup_rows = ""
     for idx, row in optimal_roster.iterrows():
         bg = "#ffffff" if idx % 2 == 0 else "#f8f9fa"
@@ -53,7 +75,6 @@ def generate_email_html(optimal_roster, sim_results, matchups_df):
         </tr>
         """
 
-    # Top Leverage Exposures Builder
     top_exposures = sim_results.head(10)
     exposure_rows = ""
     for idx, row in top_exposures.reset_index().iterrows():
@@ -79,7 +100,7 @@ def generate_email_html(optimal_roster, sim_results, matchups_df):
     rem_sal = 50000 - total_sal
     total_proj = optimal_roster['proj_fpts'].sum()
 
-    html = f"""
+    return f"""
     <!DOCTYPE html>
     <html>
     <head>
@@ -95,7 +116,7 @@ def generate_email_html(optimal_roster, sim_results, matchups_df):
             .kpi-val {{ font-size: 20px; font-weight: 800; color: #212529; }}
             .table-wrap {{ width: 100%; border-collapse: collapse; margin-top: 10px; margin-bottom: 24px; border-radius: 8px; overflow: hidden; border: 1px solid #dee2e6; }}
             th {{ background-color: #f1f3f5; color: #495057; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; padding: 10px 12px; border-bottom: 2px solid #dee2e6; text-align: left; }}
-            h3 {{ font-size: 16px; margin: 20px 0 8px 0; color: #1e3a8a; display: flex; align-items: center; }}
+            h3 {{ font-size: 16px; margin: 20px 0 8px 0; color: #1e3a8a; }}
             .footer {{ background-color: #f8f9fa; border-top: 1px solid #e9ecef; padding: 16px; text-align: center; font-size: 11px; color: #adb5bd; }}
         </style>
     </head>
@@ -129,49 +150,24 @@ def generate_email_html(optimal_roster, sim_results, matchups_df):
                 <h3>🏆 Optimal Lineup (Max FPPG Constrained)</h3>
                 <table class="table-wrap">
                     <thead>
-                        <tr>
-                            <th>Pos</th>
-                            <th>Player</th>
-                            <th>Team</th>
-                            <th>Matchup</th>
-                            <th>Salary</th>
-                            <th>Fpts</th>
-                            <th>Opt %</th>
-                            <th>Lev</th>
-                        </tr>
+                        <tr><th>Pos</th><th>Player</th><th>Team</th><th>Matchup</th><th>Salary</th><th>Fpts</th><th>Opt %</th><th>Lev</th></tr>
                     </thead>
-                    <tbody>
-                        {lineup_rows}
-                    </tbody>
+                    <tbody>{lineup_rows}</tbody>
                 </table>
 
                 <h3>⚡ Top 10 Simulated Target Exposures</h3>
                 <table class="table-wrap">
                     <thead>
-                        <tr>
-                            <th>Pos</th>
-                            <th>Player</th>
-                            <th>Team</th>
-                            <th>Matchup</th>
-                            <th>Salary</th>
-                            <th>Fpts</th>
-                            <th>Opt %</th>
-                            <th>Lev</th>
-                        </tr>
+                        <tr><th>Pos</th><th>Player</th><th>Team</th><th>Matchup</th><th>Salary</th><th>Fpts</th><th>Opt %</th><th>Lev</th></tr>
                     </thead>
-                    <tbody>
-                        {exposure_rows}
-                    </tbody>
+                    <tbody>{exposure_rows}</tbody>
                 </table>
             </div>
-            <div class="footer">
-                Automated report via Streamlit & GitHub Actions • Monte Carlo (17,500 iterations)
-            </div>
+            <div class="footer">Automated report via Streamlit & GitHub Actions • Monte Carlo (17,500 iterations)</div>
         </div>
     </body>
     </html>
     """
-    return html
 
 def send_email_report(optimal_roster, sim_results, matchups_df, sender_email, sender_password, recipient_email):
     try:
@@ -190,14 +186,13 @@ def send_email_report(optimal_roster, sim_results, matchups_df, sender_email, se
     except Exception as e:
         return False, f"Failed to send email: {e}"
 
-# --- CORE SIMULATION & DATA EXTRACTION ---
+# --- CORE SIMULATION ---
 def get_target_slate(min_fee=0.25, max_fee=30.0, min_pool=25000):
     url = "https://www.draftkings.com/lobby/getcontests?sport=NFL"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         res = requests.get(url, headers=headers, timeout=10).json()
-    except Exception as e:
-        st.error(f"Error connecting to DraftKings Lobby: {e}")
+    except Exception:
         return pd.DataFrame(), None
 
     contests = []
@@ -238,11 +233,9 @@ def fetch_player_pool(draft_group_id):
         games.append({"matchup": name, "start_time": start_str})
     matchups_df = pd.DataFrame(games)
 
-    draftables = res.get("draftables", [])
     players = []
-    for p in draftables:
-        status = p.get("status", "None")
-        if status in ["O", "IR", "D", "PUP", "SUS"]:
+    for p in res.get("draftables", []):
+        if p.get("status", "None") in ["O", "IR", "D", "PUP", "SUS"]:
             continue
         salary = p.get("salary", 0)
         if salary <= 0:
@@ -250,8 +243,7 @@ def fetch_player_pool(draft_group_id):
         pos = p.get("position")
         name = p.get("displayName")
         team = p.get("teamAbbreviation", "")
-        comp_info = p.get("competition", {})
-        matchup = comp_info.get("name", "")
+        matchup = p.get("competition", {}).get("name", "")
         
         fppg = 0.0
         for stat in p.get("draftStatAttributes", []):
@@ -268,7 +260,7 @@ def fetch_player_pool(draft_group_id):
             "matchup": matchup,
             "salary": salary,
             "fppg": fppg,
-            "status": status
+            "status": p.get("status", "None")
         })
 
     df = pd.DataFrame(players).drop_duplicates(subset=["name", "position"])
@@ -316,7 +308,7 @@ def solve_optimal_lineup(df, score_column="proj_fpts"):
         return lineup.sort_values(by="order").drop(columns=["order"])
     return None
 
-def run_simulation(df, num_simulations=17500):
+def run_simulation_pure(df, num_simulations=17500):
     n = len(df)
     salaries = df["salary"].to_numpy(dtype=np.int32)
     positions = df["position"].to_numpy()
@@ -325,8 +317,6 @@ def run_simulation(df, num_simulations=17500):
     sim_matrix = np.clip(sim_matrix, 0, None).astype(np.float32)
 
     counts = np.zeros(n, dtype=np.int32)
-    progress_bar = st.progress(0, text="Simulating DraftKings slates...")
-
     batch_size = 500
     for b_start in range(0, num_simulations, batch_size):
         b_end = min(b_start + batch_size, num_simulations)
@@ -360,15 +350,39 @@ def run_simulation(df, num_simulations=17500):
                     if x[i].solution_value() > 0.5:
                         counts[i] += 1
 
-        pct = int((b_end / num_simulations) * 100)
-        progress_bar.progress(pct, text=f"Solved {b_end:,} / {num_simulations:,} linear slates...")
-
-    progress_bar.empty()
     df["optimal_%"] = np.round((counts / num_simulations) * 100, 2)
     df["leverage"] = np.round(df["optimal_%"] / (df["salary"] / 1000), 2)
     return df.sort_values(by="optimal_%", ascending=False)
 
-# --- SIDEBAR SETTINGS ---
+# --- DETACHED WORKER (IMMUNE TO BROWSER SLEEP) ---
+def background_task(sender, pw, rec):
+    try:
+        set_status(True, "Scanning DraftKings slate...")
+        contests_df, draft_group_id = get_target_slate()
+        if contests_df.empty or not draft_group_id:
+            set_status(False, "Failed: No eligible NFL contests found.")
+            return
+
+        set_status(True, "Simulating 17,500 slates in background...")
+        players_df, matchups_df = fetch_player_pool(draft_group_id)
+        sim_results = run_simulation_pure(players_df, num_simulations=17500)
+        optimal_roster = solve_optimal_lineup(sim_results, "proj_fpts")
+
+        # Save results to disk
+        optimal_roster.to_csv(CACHE_ROSTER, index=False)
+        sim_results.to_csv(CACHE_SIM, index=False)
+        matchups_df.to_csv(CACHE_MATCHUPS, index=False)
+        
+        run_ts = time.strftime("%Y-%m-%d %I:%M %p")
+        if sender and pw and rec:
+            set_status(True, "Sending email report...")
+            send_email_report(optimal_roster, sim_results, matchups_df, sender, pw, rec)
+
+        set_status(False, "Completed successfully", run_ts)
+    except Exception as e:
+        set_status(False, f"Error: {e}")
+
+# --- UI & SIDEBAR ---
 with st.sidebar:
     st.header("📧 Email Notifications")
     send_email = st.checkbox("Email report when simulation runs", value=True)
@@ -376,82 +390,65 @@ with st.sidebar:
     sender_pw = st.secrets.get("EMAIL_PASSWORD", "") if "EMAIL_PASSWORD" in st.secrets else st.text_input("Gmail App Password", type="password")
     recipient_email = st.secrets.get("EMAIL_RECIPIENT", "") if "EMAIL_RECIPIENT" in st.secrets else st.text_input("Recipient Email", "")
 
-# --- HEADER & RUN BUTTON ---
 st.title("🏈 DraftKings Slate Scanner & Optimizer")
 
-col_btn, col_info = st.columns([1, 3])
+status = get_status()
+
+col_btn, col_info = st.columns([1, 2])
 with col_btn:
-    run_clicked = st.button("🚀 Run Live 17,500 Simulation", width="stretch", type="primary")
+    if status["running"]:
+        st.button("⏳ Simulation in progress...", width="stretch", disabled=True)
+    else:
+        if st.button("🚀 Run Live 17,500 Simulation", width="stretch", type="primary"):
+            pw = sender_pw if send_email else ""
+            t = threading.Thread(target=background_task, args=(sender_email, pw, recipient_email), daemon=True)
+            t.start()
+            set_status(True, "Starting detached solver...")
+            st.rerun()
 
-if run_clicked:
-    with st.spinner("Connecting to DraftKings API & solving slates..."):
-        t0 = time.time()
-        contests_df, draft_group_id = get_target_slate()
-        if contests_df.empty or not draft_group_id:
-            st.error("No valid NFL contests found between $0.25 and $30.00 right now.")
-        else:
-            st.session_state["contests"] = contests_df
-            players_df, matchups_df = fetch_player_pool(draft_group_id)
-            sim_results = run_simulation(players_df, num_simulations=17500)
-            optimal_roster = solve_optimal_lineup(sim_results, "proj_fpts")
+with col_info:
+    if status["running"]:
+        st.info(f"🔄 **Server Running:** {status['msg']} *(Safe to close/sleep screen)*")
+        time.sleep(2)
+        st.rerun()
+    else:
+        st.caption(f"Status: **{status['msg']}** | Last completed: **{status['last_run']}**")
 
-            st.session_state["matchups"] = matchups_df
-            st.session_state["sim_results"] = sim_results
-            st.session_state["optimal_roster"] = optimal_roster
-            st.session_state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
-
-            if send_email and sender_email and sender_pw and recipient_email:
-                ok, msg = send_email_report(optimal_roster, sim_results, matchups_df, sender_email, sender_pw, recipient_email)
-                if ok:
-                    st.success("Simulation complete & email report delivered!")
-                else:
-                    st.error(f"Email error: {msg}")
-            else:
-                st.success(f"Simulation complete in {time.time() - t0:.1f}s!")
-
-# --- DASHBOARD TABS ---
-tab1, tab2, tab3, tab4 = st.tabs(["🏆 Weekly Optimal Lineup", "🏟️ Slate Games", "⚡ Simulated Exposures", "🎯 Target Contests"])
-
+# --- DISPLAY TABS ---
+tab1, tab2, tab3 = st.tabs(["🏆 Weekly Optimal Lineup", "🏟️ Slate Games", "⚡ Simulated Exposures"])
 cols_to_display = ["position", "name", "team", "matchup", "salary", "proj_fpts", "optimal_%", "leverage"]
 
-with tab1:
-    st.header("Weekly Optimal Lineup")
-    if "optimal_roster" in st.session_state and st.session_state["optimal_roster"] is not None:
-        roster = st.session_state["optimal_roster"]
+if os.path.exists(CACHE_ROSTER) and os.path.exists(CACHE_SIM):
+    roster_df = pd.read_csv(CACHE_ROSTER)
+    sim_df = pd.read_csv(CACHE_SIM)
+    match_df = pd.read_csv(CACHE_MATCHUPS) if os.path.exists(CACHE_MATCHUPS) else pd.DataFrame()
+
+    with tab1:
+        st.header("Weekly Optimal Lineup")
         c1, c2, c3 = st.columns(3)
-        c1.metric("Total Salary", f"${roster['salary'].sum():,} / $50,000")
-        c2.metric("Projected Points", f"{roster['proj_fpts'].sum():.2f}")
-        c3.metric("Last Run", st.session_state.get("last_run", "N/A"))
-        valid_cols = [c for c in cols_to_display if c in roster.columns]
-        st.dataframe(roster[valid_cols], width="stretch")
-    else:
-        st.info("Tap '🚀 Run Live 17,500 Simulation' to generate the optimal lineup.")
+        c1.metric("Total Salary", f"${int(roster_df['salary'].sum()):,} / $50,000")
+        c2.metric("Projected Points", f"{roster_df['proj_fpts'].sum():.2f}")
+        c3.metric("Last Completed Run", status.get("last_run", "N/A"))
+        valid_cols = [c for c in cols_to_display if c in roster_df.columns]
+        st.dataframe(roster_df[valid_cols], width="stretch")
 
-with tab2:
-    st.header("🏟️ Games on this Slate")
-    if "matchups" in st.session_state and isinstance(st.session_state["matchups"], pd.DataFrame) and not st.session_state["matchups"].empty:
-        st.dataframe(st.session_state["matchups"], width="stretch")
-    else:
-        st.info("Game matchups will appear after running the simulation.")
+    with tab2:
+        st.header("🏟️ Games on this Slate")
+        if not match_df.empty:
+            st.dataframe(match_df, width="stretch")
+        else:
+            st.info("No game data found.")
 
-with tab3:
-    st.header("17,500 Optimal Appearance Rates")
-    if "sim_results" in st.session_state:
-        df_sim = st.session_state["sim_results"]
+    with tab3:
+        st.header("17,500 Optimal Appearance Rates")
         col1, col2 = st.columns([1, 3])
         with col1:
             min_opt = st.slider("Minimum Optimal %", 0.0, 40.0, 2.0, step=0.5)
         with col2:
             pos_filter = st.multiselect("Filter Positions", ["QB", "RB", "WR", "TE", "DST"], default=["QB", "RB", "WR", "TE", "DST"])
-        valid_cols = [c for c in cols_to_display if c in df_sim.columns]
-        filtered = df_sim[(df_sim["optimal_%"] >= min_opt) & (df_sim["position"].isin(pos_filter))]
+        valid_cols = [c for c in cols_to_display if c in sim_df.columns]
+        filtered = sim_df[(sim_df["optimal_%"] >= min_opt) & (sim_df["position"].isin(pos_filter))]
         st.dataframe(filtered[valid_cols], width="stretch")
-    else:
-        st.warning("No simulation data found.")
-
-with tab4:
-    st.header("Target Contests ($0.25 - $30.00)")
-    if "contests" in st.session_state:
-        st.dataframe(st.session_state["contests"][["name", "entry_fee", "prize_pool", "multiplier"]], width="stretch")
-    else:
-        st.info("Contest data will load once you run a simulation.")
+else:
+    with tab1:
+        st.info("No cached run found yet. Click **Run Live 17,500 Simulation** to start.")
