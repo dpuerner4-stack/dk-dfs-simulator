@@ -4,10 +4,48 @@ import numpy as np
 import requests
 from ortools.linear_solver import pywraplp
 import time
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 st.set_page_config(page_title="DraftKings Optimizer", layout="wide")
 
-# --- 1. CORE SIMULATION & OPTIMIZATION FUNCTIONS ---
+# --- EMAIL DISPATCH FUNCTION ---
+def send_email_report(optimal_roster, sim_results, sender_email, sender_password, recipient_email):
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = f"🏈 DraftKings Optimal Lineup & Simulation Report ({time.strftime('%b %d, %Y')})"
+        msg["From"] = sender_email
+        msg["To"] = recipient_email
+
+        top_exposures = sim_results.head(10)[["position", "name", "salary", "proj_fpts", "optimal_%", "leverage"]]
+        
+        html = f"""
+        <html>
+          <body style="font-family: Arial, sans-serif; color: #333;">
+            <h2 style="color: #0b5394;">DraftKings 17,500 Simulation Roster Report</h2>
+            <p><strong>Run Timestamp:</strong> {time.strftime('%Y-%m-%d %H:%M:%S')}</p>
+            <p><strong>Total Lineup Salary:</strong> ${optimal_roster['salary'].sum():,} / $50,000<br>
+            <strong>Projected Points:</strong> {optimal_roster['proj_fpts'].sum():.2f}</p>
+            
+            <h3>🏆 Optimal Lineup</h3>
+            {optimal_roster[['position', 'name', 'salary', 'proj_fpts', 'optimal_%', 'leverage']].to_html(index=False, border=1)}
+            
+            <h3>⚡ Top 10 Target Exposures</h3>
+            {top_exposures.to_html(index=False, border=1)}
+          </body>
+        </html>
+        """
+        msg.attach(MIMEText(html, "html"))
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(sender_email, sender_password)
+            server.sendmail(sender_email, recipient_email, msg.as_string())
+        return True, "Email report sent successfully!"
+    except Exception as e:
+        return False, f"Failed to send email: {e}"
+
+# --- CORE SIMULATION & OPTIMIZATION FUNCTIONS ---
 def get_target_slate(min_fee=0.25, max_fee=30.0, min_pool=25000):
     url = "https://www.draftkings.com/lobby/getcontests?sport=NFL"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -129,7 +167,6 @@ def run_simulation(df, num_simulations=17500):
     counts = np.zeros(n, dtype=np.int32)
     progress_bar = st.progress(0, text="Simulating DraftKings slates...")
 
-    # Batch solve for responsive cloud execution
     batch_size = 500
     for b_start in range(0, num_simulations, batch_size):
         b_end = min(b_start + batch_size, num_simulations)
@@ -171,7 +208,15 @@ def run_simulation(df, num_simulations=17500):
     df["leverage"] = np.round(df["optimal_%"] / (df["salary"] / 1000), 2)
     return df.sort_values(by="optimal_%", ascending=False)
 
-# --- 2. HEADER & PROMINENT RUN BUTTON ---
+# --- SIDEBAR: NOTIFICATION SETTINGS ---
+with st.sidebar:
+    st.header("📧 Email Notifications")
+    send_email = st.checkbox("Email report when simulation runs", value=True)
+    sender_email = st.secrets.get("EMAIL_SENDER", "") if "EMAIL_SENDER" in st.secrets else st.text_input("Sender Gmail", "")
+    sender_pw = st.secrets.get("EMAIL_PASSWORD", "") if "EMAIL_PASSWORD" in st.secrets else st.text_input("Gmail App Password", type="password")
+    recipient_email = st.secrets.get("EMAIL_RECIPIENT", "") if "EMAIL_RECIPIENT" in st.secrets else st.text_input("Recipient Email", "")
+
+# --- HEADER & RUN BUTTON ---
 st.title("🏈 DraftKings Slate Scanner & Optimizer")
 
 col_btn, col_info = st.columns([1, 3])
@@ -193,13 +238,21 @@ if run_clicked:
             st.session_state["sim_results"] = sim_results
             st.session_state["optimal_roster"] = optimal_roster
             st.session_state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            st.success(f"Done in {time.time() - t0:.1f}s!")
 
-# --- 3. DASHBOARD TABS ---
+            if send_email and sender_email and sender_pw and recipient_email:
+                ok, msg = send_email_report(optimal_roster, sim_results, sender_email, sender_pw, recipient_email)
+                if ok:
+                    st.success("Simulation complete & email report delivered!")
+                else:
+                    st.warning(f"Simulation complete, but {msg}")
+            else:
+                st.success(f"Simulation complete in {time.time() - t0:.1f}s!")
+
+# --- DASHBOARD TABS ---
 tab1, tab2, tab3 = st.tabs(["🏆 Weekly Optimal Lineup", "⚡ Simulated Exposures", "🎯 Target Contests ($0.25 - $30.00)"])
 
 with tab1:
-    st.header("Weekly Optimal Lineup (Max Projections & Salary Constraints)")
+    st.header("Weekly Optimal Lineup")
     if "optimal_roster" in st.session_state and st.session_state["optimal_roster"] is not None:
         roster = st.session_state["optimal_roster"]
         c1, c2, c3 = st.columns(3)
@@ -208,7 +261,7 @@ with tab1:
         c3.metric("Last Run", st.session_state.get("last_run", "N/A"))
         st.dataframe(roster[["position", "name", "salary", "proj_fpts", "optimal_%", "leverage"]], use_container_width=True)
     else:
-        st.info("Tap the **🚀 Run Live 17,500 Simulation** button above to generate this week's optimal lineup.")
+        st.info("Tap '🚀 Run Live 17,500 Simulation' to generate the optimal lineup.")
 
 with tab2:
     st.header("17,500 Optimal Appearance Rates")
@@ -222,7 +275,7 @@ with tab2:
         filtered = df_sim[(df_sim["optimal_%"] >= min_opt) & (df_sim["position"].isin(pos_filter))]
         st.dataframe(filtered[["position", "name", "salary", "proj_fpts", "optimal_%", "leverage"]], use_container_width=True)
     else:
-        st.warning("No simulation data found. Tap 'Run Live 17,500 Simulation' above!")
+        st.warning("No simulation data found.")
 
 with tab3:
     st.header("Target Contests ($0.25 - $30.00)")
