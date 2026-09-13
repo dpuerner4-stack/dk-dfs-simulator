@@ -4,6 +4,8 @@ import numpy as np
 import requests
 from ortools.linear_solver import pywraplp
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -12,6 +14,24 @@ import json
 import os
 
 st.set_page_config(page_title="DraftKings Optimizer", layout="wide")
+
+ET_TZ = ZoneInfo("America/New_York")
+
+def get_current_et_str(fmt="%A, %b %d, %Y at %I:%M %p ET"):
+    return datetime.now(ET_TZ).strftime(fmt)
+
+def format_utc_to_et(utc_str):
+    if not utc_str or utc_str == "TBD":
+        return "TBD"
+    try:
+        clean_str = utc_str.replace("Z", "")
+        if "." in clean_str:
+            clean_str = clean_str.split(".")[0]
+        dt_utc = datetime.fromisoformat(clean_str).replace(tzinfo=ZoneInfo("UTC"))
+        dt_et = dt_utc.astimezone(ET_TZ)
+        return dt_et.strftime("%a %I:%M %p ET")
+    except Exception:
+        return utc_str
 
 CACHE_DIR = "sim_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -50,7 +70,7 @@ def generate_email_html(optimal_roster, sim_results, matchups_df):
         for _, row in matchups_df.iterrows():
             matchup_badges += f"""
             <span style="display: inline-block; background-color: #f1f3f5; border: 1px solid #dee2e6; border-radius: 6px; padding: 6px 12px; margin: 4px; font-weight: 600; font-size: 13px; color: #343a40;">
-                🏈 {row['matchup']} &nbsp;<span style="font-weight: 400; color: #6c757d;">({row['start_time']})</span>
+                🏈 {row['matchup']} &nbsp;<span style="font-weight: 400; color: #6c757d;">({row['start_time_et']})</span>
             </span>
             """
     else:
@@ -125,11 +145,11 @@ def generate_email_html(optimal_roster, sim_results, matchups_df):
         <div class="container">
             <div class="header">
                 <h2 style="margin: 0 0 6px 0; font-size: 22px; font-weight: 800;">🏈 DraftKings Optimizer Digest</h2>
-                <div style="font-size: 13px; opacity: 0.85;">Generated on {time.strftime('%A, %b %d, %Y at %I:%M %p')}</div>
+                <div style="font-size: 13px; opacity: 0.85;">Generated on {get_current_et_str()}</div>
             </div>
             <div class="content">
                 <div style="margin-bottom: 16px;">
-                    <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; color: #6c757d; margin-bottom: 6px;">Included Matchups</div>
+                    <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; color: #6c757d; margin-bottom: 6px;">Included Matchups (Eastern Time)</div>
                     {matchup_badges}
                 </div>
 
@@ -229,9 +249,9 @@ def fetch_player_pool(draft_group_id):
     games = []
     for comp in competitions:
         name = comp.get("name", "")
-        start = comp.get("startTime", "")
-        start_str = start.replace("T", " ").split(".")[0] if start else "TBD"
-        games.append({"matchup": name, "start_time": start_str})
+        start_raw = comp.get("startTime", "")
+        start_et = format_utc_to_et(start_raw)
+        games.append({"matchup": name, "start_time_et": start_et})
     matchups_df = pd.DataFrame(games)
 
     players = []
@@ -379,7 +399,7 @@ def background_task(sender, pw, rec):
         sim_results.to_csv(CACHE_SIM, index=False)
         matchups_df.to_csv(CACHE_MATCHUPS, index=False)
         
-        run_ts = time.strftime("%Y-%m-%d %I:%M %p")
+        run_ts = get_current_et_str("%Y-%m-%d %I:%M %p ET")
         if sender and pw and rec:
             set_status(True, "Sending email digest...", progress=94)
             send_email_report(optimal_roster, sim_results, matchups_df, sender, pw, rec)
@@ -441,7 +461,7 @@ if os.path.exists(CACHE_ROSTER) and os.path.exists(CACHE_SIM):
         st.dataframe(roster_df[valid_cols], width="stretch")
 
     with tab2:
-        st.header("🏟️ Games on this Slate")
+        st.header("🏟️ Games on this Slate (Eastern Time)")
         if not match_df.empty:
             st.dataframe(match_df, width="stretch")
         else:
