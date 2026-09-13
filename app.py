@@ -295,50 +295,114 @@ def fetch_player_pool(draft_group_id):
     df["std_dev"] = df.apply(calc_std, axis=1)
     return df.reset_index(drop=True), matchups_df
 
+def is_showdown(df):
+    if "roster_position" in df.columns and "CPT" in df["roster_position"].values:
+        return True
+    return df["team"].nunique() == 2
+
 def solve_optimal_lineup(df, score_column="proj_fpts"):
+    df = df.reset_index(drop=True)
+    n = len(df)
+    showdown = is_showdown(df)
+
     solver = pywraplp.Solver.CreateSolver("CBC")
     if not solver:
         return None
-    n = len(df)
-    x = [solver.BoolVar(f"x_{i}") for i in range(n)]
 
-    obj = solver.Objective()
-    for i in range(n):
-        obj.SetCoefficient(x[i], float(df.loc[i, score_column]))
-    obj.SetMaximization()
+    if showdown:
+        cpt = [solver.BoolVar(f"cpt_{i}") for i in range(n)]
+        flex = [solver.BoolVar(f"flex_{i}") for i in range(n)]
 
-    sal_ct = solver.Constraint(0, 50000)
-    qb_ct, dst_ct = solver.Constraint(1, 1), solver.Constraint(1, 1)
-    rb_ct, wr_ct, te_ct = solver.Constraint(2, 3), solver.Constraint(3, 4), solver.Constraint(1, 2)
-    flex_ct, tot_ct = solver.Constraint(7, 7), solver.Constraint(9, 9)
+        obj = solver.Objective()
+        sal_ct = solver.Constraint(0, 50000)
+        cpt_ct = solver.Constraint(1, 1)
+        flex_ct = solver.Constraint(5, 5)
 
-    for i, pos in enumerate(df["position"]):
-        sal_ct.SetCoefficient(x[i], int(df.loc[i, "salary"]))
-        tot_ct.SetCoefficient(x[i], 1)
-        if pos == "QB": qb_ct.SetCoefficient(x[i], 1)
-        elif pos == "DST": dst_ct.SetCoefficient(x[i], 1)
-        elif pos == "RB": rb_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
-        elif pos == "WR": wr_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
-        elif pos == "TE": te_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
+        for i in range(n):
+            fpts = float(df.loc[i, score_column])
+            sal = int(df.loc[i, "salary"])
+            obj.SetCoefficient(cpt[i], 1.5 * fpts)
+            obj.SetCoefficient(flex[i], fpts)
+            sal_ct.SetCoefficient(cpt[i], int(sal * 1.5))
+            sal_ct.SetCoefficient(flex[i], sal)
+            cpt_ct.SetCoefficient(cpt[i], 1)
+            flex_ct.SetCoefficient(flex[i], 1)
+            mut_ex = solver.Constraint(0, 1)
+            mut_ex.SetCoefficient(cpt[i], 1)
+            mut_ex.SetCoefficient(flex[i], 1)
 
-    if solver.Solve() == pywraplp.Solver.OPTIMAL:
-        selected = [i for i in range(n) if x[i].solution_value() > 0.5]
-        lineup = df.loc[selected].copy()
-        pos_order = {"QB": 1, "RB": 2, "WR": 3, "TE": 4, "DST": 5}
-        lineup["order"] = lineup["position"].map(pos_order)
-        return lineup.sort_values(by="order").drop(columns=["order"])
+        teams = df["team"].unique()
+        if len(teams) == 2:
+            for t in teams:
+                t_ct = solver.Constraint(1, 6)
+                for i in range(n):
+                    if df.loc[i, "team"] == t:
+                        t_ct.SetCoefficient(cpt[i], 1)
+                        t_ct.SetCoefficient(flex[i], 1)
+
+        obj.SetMaximization()
+        if solver.Solve() == pywraplp.Solver.OPTIMAL:
+            rows = []
+            for i in range(n):
+                if cpt[i].solution_value() > 0.5:
+                    r = df.loc[i].to_dict()
+                    r["position"] = "CPT"
+                    r["salary"] = int(r["salary"] * 1.5)
+                    r["proj_fpts"] = round(r["proj_fpts"] * 1.5, 2)
+                    r["order"] = 0
+                    rows.append(r)
+                elif flex[i].solution_value() > 0.5:
+                    r = df.loc[i].to_dict()
+                    r["position"] = "FLEX"
+                    r["order"] = 1
+                    rows.append(r)
+            res = pd.DataFrame(rows)
+            return res.sort_values("order").drop(columns=["order"])
+
+    else:
+        x = [solver.BoolVar(f"x_{i}") for i in range(n)]
+        obj = solver.Objective()
+        for i in range(n):
+            obj.SetCoefficient(x[i], float(df.loc[i, score_column]))
+        obj.SetMaximization()
+
+        sal_ct = solver.Constraint(0, 50000)
+        qb_ct, dst_ct = solver.Constraint(1, 1), solver.Constraint(1, 1)
+        rb_ct, wr_ct, te_ct = solver.Constraint(2, 3), solver.Constraint(3, 4), solver.Constraint(1, 2)
+        flex_ct, tot_ct = solver.Constraint(7, 7), solver.Constraint(9, 9)
+
+        for i, pos in enumerate(df["position"]):
+            sal_ct.SetCoefficient(x[i], int(df.loc[i, "salary"]))
+            tot_ct.SetCoefficient(x[i], 1)
+            if pos == "QB": qb_ct.SetCoefficient(x[i], 1)
+            elif pos == "DST": dst_ct.SetCoefficient(x[i], 1)
+            elif pos == "RB": rb_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
+            elif pos == "WR": wr_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
+            elif pos == "TE": te_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
+
+        if solver.Solve() == pywraplp.Solver.OPTIMAL:
+            selected = [i for i in range(n) if x[i].solution_value() > 0.5]
+            lineup = df.loc[selected].copy()
+            pos_order = {"QB": 1, "RB": 2, "WR": 3, "TE": 4, "DST": 5}
+            lineup["order"] = lineup["position"].map(pos_order)
+            return lineup.sort_values(by="order").drop(columns=["order"])
+
     return None
 
 def run_simulation_pure(df, num_simulations=17500):
+    df = df.reset_index(drop=True)
     n = len(df)
+    showdown = is_showdown(df)
     salaries = df["salary"].to_numpy(dtype=np.int32)
     positions = df["position"].to_numpy()
-    
+    teams = df["team"].to_numpy()
+
     sim_matrix = np.random.normal(df["proj_fpts"], df["std_dev"], size=(num_simulations, n))
     sim_matrix = np.clip(sim_matrix, 0, None).astype(np.float32)
 
     counts = np.zeros(n, dtype=np.int32)
     batch_size = 1000
+
     for b_start in range(0, num_simulations, batch_size):
         b_end = min(b_start + batch_size, num_simulations)
         for s in range(b_start, b_end):
@@ -346,30 +410,63 @@ def run_simulation_pure(df, num_simulations=17500):
             solver = pywraplp.Solver.CreateSolver("CBC")
             if not solver:
                 continue
-            x = [solver.BoolVar(f"x_{i}") for i in range(n)]
-            obj = solver.Objective()
-            for i in range(n):
-                obj.SetCoefficient(x[i], float(scores[i]))
-            obj.SetMaximization()
 
-            sal_ct = solver.Constraint(0, 50000)
-            qb_ct, dst_ct = solver.Constraint(1, 1), solver.Constraint(1, 1)
-            rb_ct, wr_ct, te_ct = solver.Constraint(2, 3), solver.Constraint(3, 4), solver.Constraint(1, 2)
-            flex_ct, tot_ct = solver.Constraint(7, 7), solver.Constraint(9, 9)
+            if showdown:
+                cpt = [solver.BoolVar(f"c_{i}") for i in range(n)]
+                flx = [solver.BoolVar(f"f_{i}") for i in range(n)]
+                obj = solver.Objective()
+                sal_ct = solver.Constraint(0, 50000)
+                cpt_ct = solver.Constraint(1, 1)
+                flx_ct = solver.Constraint(5, 5)
 
-            for i, pos in enumerate(positions):
-                sal_ct.SetCoefficient(x[i], int(salaries[i]))
-                tot_ct.SetCoefficient(x[i], 1)
-                if pos == "QB": qb_ct.SetCoefficient(x[i], 1)
-                elif pos == "DST": dst_ct.SetCoefficient(x[i], 1)
-                elif pos == "RB": rb_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
-                elif pos == "WR": wr_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
-                elif pos == "TE": te_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
-
-            if solver.Solve() == pywraplp.Solver.OPTIMAL:
                 for i in range(n):
-                    if x[i].solution_value() > 0.5:
-                        counts[i] += 1
+                    obj.SetCoefficient(cpt[i], 1.5 * float(scores[i]))
+                    obj.SetCoefficient(flx[i], float(scores[i]))
+                    sal_ct.SetCoefficient(cpt[i], int(salaries[i] * 1.5))
+                    sal_ct.SetCoefficient(flx[i], int(salaries[i]))
+                    cpt_ct.SetCoefficient(cpt[i], 1)
+                    flx_ct.SetCoefficient(flx[i], 1)
+                    m_ex = solver.Constraint(0, 1)
+                    m_ex.SetCoefficient(cpt[i], 1)
+                    m_ex.SetCoefficient(flx[i], 1)
+
+                for t in np.unique(teams):
+                    t_ct = solver.Constraint(1, 6)
+                    for i in range(n):
+                        if teams[i] == t:
+                            t_ct.SetCoefficient(cpt[i], 1)
+                            t_ct.SetCoefficient(flx[i], 1)
+
+                obj.SetMaximization()
+                if solver.Solve() == pywraplp.Solver.OPTIMAL:
+                    for i in range(n):
+                        if cpt[i].solution_value() > 0.5 or flx[i].solution_value() > 0.5:
+                            counts[i] += 1
+            else:
+                x = [solver.BoolVar(f"x_{i}") for i in range(n)]
+                obj = solver.Objective()
+                for i in range(n):
+                    obj.SetCoefficient(x[i], float(scores[i]))
+                obj.SetMaximization()
+
+                sal_ct = solver.Constraint(0, 50000)
+                qb_ct, dst_ct = solver.Constraint(1, 1), solver.Constraint(1, 1)
+                rb_ct, wr_ct, te_ct = solver.Constraint(2, 3), solver.Constraint(3, 4), solver.Constraint(1, 2)
+                flex_ct, tot_ct = solver.Constraint(7, 7), solver.Constraint(9, 9)
+
+                for i, pos in enumerate(positions):
+                    sal_ct.SetCoefficient(x[i], int(salaries[i]))
+                    tot_ct.SetCoefficient(x[i], 1)
+                    if pos == "QB": qb_ct.SetCoefficient(x[i], 1)
+                    elif pos == "DST": dst_ct.SetCoefficient(x[i], 1)
+                    elif pos == "RB": rb_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
+                    elif pos == "WR": wr_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
+                    elif pos == "TE": te_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
+
+                if solver.Solve() == pywraplp.Solver.OPTIMAL:
+                    for i in range(n):
+                        if x[i].solution_value() > 0.5:
+                            counts[i] += 1
 
         pct = 15 + int((b_end / num_simulations) * 70)
         set_status(True, f"Simulating {b_end:,} / {num_simulations:,} slates...", progress=pct)
@@ -377,7 +474,6 @@ def run_simulation_pure(df, num_simulations=17500):
     df["optimal_%"] = np.round((counts / num_simulations) * 100, 2)
     df["leverage"] = np.round(df["optimal_%"] / (df["salary"] / 1000), 2)
     return df.sort_values(by="optimal_%", ascending=False)
-
 # --- DETACHED WORKER ---
 def background_task(sender, pw, rec):
     try:
