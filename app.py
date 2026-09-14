@@ -417,6 +417,13 @@ def solve_slate(df, score_column, slate_type, team_opponents=None):
     import pulp
     import pandas as pd
     
+    if df is None or not isinstance(df, pd.DataFrame) or len(df) == 0:
+        return []
+    
+    df = df.reset_index(drop=True)
+    import pulp
+    import pandas as pd
+    
     df = df.reset_index(drop=True)
     if len(df) == 0:
         return []
@@ -645,3 +652,24 @@ if os.path.exists(CACHE_ROSTER) and os.path.exists(CACHE_SIM):
 else:
     with tab1:
         st.info("No cached run found yet. Select your slate in the sidebar and tap **Run Live Simulation**.")
+
+
+def render_multi_slate_optimizer():
+    import streamlit as st
+    st.subheader("Multi-Slate Optimal Lineups (Classic & Showdown)")
+    # Fetch active contests and group by format
+    try:
+        slates = get_all_active_slates() if "get_all_active_slates" in globals() else {}
+    except Exception:
+        slates = {}
+        
+    if not slates:
+        st.info("Scanning lobby for active Classic and Showdown slates...")
+        return
+
+    cols = st.columns(len(slates) if len(slates) > 0 else 1)
+    for idx, (dg, info) in enumerate(slates.items()):
+        with cols[idx % len(cols)]:
+            st.markdown(f"### {info["slate_type"]}")
+            st.caption(f"{info["name"]}")
+            st.write(f"Prize Pool: ${info["prize_pool"]:,}")
