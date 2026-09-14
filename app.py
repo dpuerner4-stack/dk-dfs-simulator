@@ -356,69 +356,62 @@ def solve_slate(df, score_column, slate_type, team_opponents=None):
     import pandas as pd
     
     df = df.reset_index(drop=True)
-    
-    # === BACKUP QB & PHANTOM PUNT PLAYER FILTERS ===
-    # 1. Remove sub-threshold low projection noise
+    if len(df) == 0:
+        return []
+
+    # Safe projection floor filter
     if score_column in df.columns:
         df = df[df[score_column] >= 3.0].copy()
-    
-    # 2. Hard filter: Strip backup QBs with low projections (not starting)
-    if "position" in df.columns and score_column in df.columns:
-        df = df[~((df["position"].str.upper() == "QB") & (df[score_column] < 12.0))].copy()
-    
-    df = df.reset_index(drop=True)
-    n = len(df)
-    if n == 0:
-        return []
-    import pulp
-    import pandas as pd
-    
+
+    # Safe backup QB filter
+    pos_col = next((c for c in df.columns if str(c).lower() in ["position", "pos"]), None)
+    if pos_col and score_column in df.columns:
+        df = df[~((df[pos_col].astype(str).str.upper() == "QB") & (df[score_column] < 12.0))].copy()
+
     df = df.reset_index(drop=True)
     n = len(df)
     if n == 0:
         return []
 
     prob = pulp.LpProblem("DK_Solver", pulp.LpMaximize)
-    
-    # Create binary variables for each row in df
     x = [pulp.LpVariable(f"x_{i}", cat=pulp.LpBinary) for i in range(n)]
 
     # Objective function
-    prob += pulp.lpSum([df.loc[i, score_column] * x[i] for i in range(n)])
+    prob += pulp.lpSum([float(df.loc[i, score_column]) * x[i] for i in range(n) if score_column in df.columns])
 
-    # Salary cap constraint ($50,000)
-    prob += pulp.lpSum([df.loc[i, "salary"] * x[i] for i in range(n)]) <= 50000
+    # Salary cap ($50,000)
+    sal_col = next((c for c in df.columns if str(c).lower() == "salary"), "salary")
+    if sal_col in df.columns:
+        prob += pulp.lpSum([float(df.loc[i, sal_col]) * x[i] for i in range(n)]) <= 50000
 
     if slate_type == "Showdown":
-        # Exactly 6 players total
         prob += pulp.lpSum([x[i] for i in range(n)]) == 6
 
-        # Identify CPT rows vs FLEX rows
-        cpt_indices = [i for i in range(n) if str(df.loc[i, "roster_slot"]) == "CPT" or str(df.loc[i, "position"]) == "CPT"]
+        # Identify Captain vs Flex rows safely
+        slot_col = next((c for c in df.columns if str(c).lower() in ["roster_slot", "slot", "rosterslot"]), None)
+        if slot_col:
+            cpt_indices = [i for i in range(n) if str(df.loc[i, slot_col]).upper() == "CPT" or (pos_col and str(df.loc[i, pos_col]).upper() == "CPT")]
+        else:
+            cpt_indices = [i for i in range(n) if pos_col and str(df.loc[i, pos_col]).upper() == "CPT"]
+            
         flex_indices = [i for i in range(n) if i not in cpt_indices]
 
-        # Exactly 1 Captain
         if cpt_indices:
             prob += pulp.lpSum([x[i] for i in cpt_indices]) == 1
-        # Exactly 5 Flex
         if flex_indices:
             prob += pulp.lpSum([x[i] for i in flex_indices]) == 5
 
-        # Mutual exclusion: A player cannot be chosen as both CPT and FLEX
-        # Group by player name or ID to link their CPT and FLEX entries
-        name_col = "name" if "name" in df.columns else df.columns[0]
+        # Mutual exclusion per player name
+        name_col = next((c for c in df.columns if str(c).lower() in ["name", "player", "player name"]), df.columns[0])
         for name, group in df.groupby(name_col):
             idxs = group.index.tolist()
             if len(idxs) > 1:
                 prob += pulp.lpSum([x[i] for i in idxs]) <= 1
     else:
-        # Classic / standard slate constraints
         prob += pulp.lpSum([x[i] for i in range(n)]) == 9
 
     prob.solve(pulp.PULP_CBC_CMD(msg=0))
-
-    selected_indices = [i for i in range(n) if pulp.value(x[i]) > 0.5]
-    return selected_indices
+    return [i for i in range(n) if pulp.value(x[i]) > 0.5]
 
 def run_simulation_pure(df, slate_type, team_opponents, num_simulations=6700):
     n = len(df)
