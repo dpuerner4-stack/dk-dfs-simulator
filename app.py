@@ -17,6 +17,7 @@ import sys
 st.set_page_config(page_title="DraftKings Optimizer", layout="wide")
 
 ET_TZ = ZoneInfo("America/New_York")
+DEFAULT_SIMULATIONS = 6700
 
 def get_current_et_str(fmt="%A, %b %d, %Y at %I:%M %p ET"):
     return datetime.now(ET_TZ).strftime(fmt)
@@ -40,7 +41,6 @@ CACHE_SIM = os.path.join(CACHE_DIR, "latest_sim.csv")
 CACHE_MATCHUPS = os.path.join(CACHE_DIR, "latest_matchups.csv")
 CACHE_STATUS = os.path.join(CACHE_DIR, "status.json")
 
-# --- BACKGROUND THREAD STATUS HELPERS ---
 def get_status():
     if os.path.exists(CACHE_STATUS):
         try:
@@ -63,7 +63,6 @@ def set_status(running, msg, progress=0, last_run=None, slate_name=None, slate_t
     with open(CACHE_STATUS, "w") as f:
         json.dump(payload, f)
 
-# --- MODERN EMAIL TEMPLATE GENERATOR ---
 def generate_email_html(optimal_roster, sim_results, matchups_df, slate_title, slate_type):
     pos_colors = {"QB": "#e06666", "RB": "#6fa8dc", "WR": "#ffd966", "TE": "#93c47d", "DST": "#8e7cc3", "CPT": "#f6b26b", "FLEX": "#6fa8dc"}
 
@@ -170,7 +169,7 @@ def generate_email_html(optimal_roster, sim_results, matchups_df, slate_title, s
                     </div>
                 </div>
 
-                <h3>🏆 Optimal Lineup (Precision Optimized)</h3>
+                <h3>🏆 Optimal Lineup</h3>
                 <table class="table-wrap">
                     <thead>
                         <tr><th>Pos</th><th>Player</th><th>Team</th><th>Matchup</th><th>Salary</th><th>Fpts</th><th>Opt %</th><th>Lev</th></tr>
@@ -186,13 +185,15 @@ def generate_email_html(optimal_roster, sim_results, matchups_df, slate_title, s
                     <tbody>{exposure_rows}</tbody>
                 </table>
             </div>
-            <div class="footer">Automated report via Streamlit & GitHub Actions • Monte Carlo (17,500 iterations)</div>
+            <div class="footer">Automated report via Streamlit & GitHub Actions • Monte Carlo (6,700 iterations)</div>
         </div>
     </body>
     </html>
     """
 
 def send_email_report(optimal_roster, sim_results, matchups_df, slate_title, slate_type, sender_email, sender_password, recipient_email):
+    if not sender_email or not sender_password or not recipient_email:
+        return False, "Missing credentials"
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = f"🏈 DraftKings Lineup Alert: {slate_title} - {optimal_roster['proj_fpts'].sum():.1f} FPTS (${int(optimal_roster['salary'].sum()):,})"
@@ -205,18 +206,17 @@ def send_email_report(optimal_roster, sim_results, matchups_df, slate_title, sla
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(sender_email, sender_password)
             server.sendmail(sender_email, recipient_email, msg.as_string())
-        return True, "Email report sent successfully!"
+        return True, "Delivered"
     except Exception as e:
-        return False, f"Failed to send email: {e}"
+        return False, str(e)
 
-# --- SLATE SCANNER WITH EXPLICIT WINDOW FILTERING ---
-def get_target_slate(target_mode="Auto-Detect Next Slate", min_fee=0.25, max_fee=30.0, min_pool=5000):
+def get_target_slate(target_mode="Auto-Detect Next Slate", min_fee=0.25):
     url = "https://www.draftkings.com/lobby/getcontests?sport=NFL"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         res = requests.get(url, headers=headers, timeout=10).json()
     except Exception:
-        return pd.DataFrame(), None, "Classic", "Unknown Slate"
+        return pd.DataFrame(), None, "Classic", "No Slates Found"
 
     contests = []
     for c in res.get("Contests", []):
@@ -239,9 +239,8 @@ def get_target_slate(target_mode="Auto-Detect Next Slate", min_fee=0.25, max_fee
 
     df = pd.DataFrame(contests)
     if df.empty:
-        return pd.DataFrame(), None, "Classic", "No Slates Found"
+        return pd.DataFrame(), None, "Classic", "No Active Contests"
 
-    # Filter based on user target selection
     matched_df = df.copy()
     if target_mode == "Sunday Main Slate (Classic)":
         matched_df = df[~df["is_showdown"] & df["name"].str.contains("Main", case=False, na=False)]
@@ -255,14 +254,12 @@ def get_target_slate(target_mode="Auto-Detect Next Slate", min_fee=0.25, max_fee
         matched_df = df[df["is_showdown"] & (df["name"].str.contains("MNF", case=False, na=False) | df["name"].str.contains("Monday", case=False, na=False))]
 
     if matched_df.empty:
-        matched_df = df  # fallback to top contest
+        matched_df = df
 
     matched_df = matched_df.sort_values(by="prize_pool", ascending=False)
     best = matched_df.iloc[0]
     slate_type = "Showdown" if best["is_showdown"] else "Classic"
-    slate_title = best["name"]
-
-    return matched_df, best["draft_group_id"], slate_type, slate_title
+    return matched_df, best["draft_group_id"], slate_type, best["name"]
 
 def fetch_player_pool(draft_group_id, slate_type):
     url = f"https://api.draftkings.com/draftgroups/v1/draftgroups/{draft_group_id}/draftables?format=json"
@@ -323,7 +320,7 @@ def fetch_player_pool(draft_group_id, slate_type):
         })
 
     if not players:
-        raise ValueError("No active players found for this DraftKings slate right now.")
+        raise ValueError("DraftKings player pool is currently empty for this draft group.")
 
     df = pd.DataFrame(players).drop_duplicates(subset=["player_id", "position"])
     df["proj_fpts"] = pd.to_numeric(df["fppg"], errors="coerce").fillna(df["salary"] / 450.0)
@@ -336,7 +333,6 @@ def fetch_player_pool(draft_group_id, slate_type):
     df["std_dev"] = df.apply(calc_std, axis=1)
     return df.reset_index(drop=True), matchups_df, team_opponents
 
-# --- OR-TOOLS LINEAR SOLVER ---
 def solve_slate(df, score_column, slate_type, team_opponents=None):
     solver = pywraplp.Solver.CreateSolver("CBC")
     if not solver:
@@ -396,7 +392,6 @@ def solve_slate(df, score_column, slate_type, team_opponents=None):
             elif pos == "WR": wr_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
             elif pos == "TE": te_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
 
-        # Primary QB Stack: At least 1 WR/TE from same team
         qbs = df[df["position"] == "QB"]
         for _, qb_row in qbs.iterrows():
             qb_idx = qb_row.name
@@ -408,7 +403,6 @@ def solve_slate(df, score_column, slate_type, team_opponents=None):
                 for partner_idx in stack_partners:
                     stack_ct.SetCoefficient(x[partner_idx], 1)
 
-        # Anti-Correlation: Do not roster opposing DST against QB
         if team_opponents:
             for _, qb_row in qbs.iterrows():
                 qb_idx = qb_row.name
@@ -433,13 +427,13 @@ def solve_slate(df, score_column, slate_type, team_opponents=None):
         return lineup.sort_values(by="order").drop(columns=["order"])
     return None
 
-def run_simulation_pure(df, slate_type, team_opponents, num_simulations=17500):
+def run_simulation_pure(df, slate_type, team_opponents, num_simulations=6700):
     n = len(df)
     sim_matrix = np.random.normal(df["proj_fpts"], df["std_dev"], size=(num_simulations, n))
     sim_matrix = np.clip(sim_matrix, 0, None).astype(np.float32)
 
     counts = np.zeros(n, dtype=np.int32)
-    batch_size = 1000
+    batch_size = 500
 
     for b_start in range(0, num_simulations, batch_size):
         b_end = min(b_start + batch_size, num_simulations)
@@ -451,14 +445,13 @@ def run_simulation_pure(df, slate_type, team_opponents, num_simulations=17500):
                     counts[idx] += 1
 
         pct = 15 + int((b_end / num_simulations) * 70)
-        set_status(True, f"Simulating {b_end:,} / {num_simulations:,} slates with stacking & rules...", progress=pct, slate_type=slate_type)
+        set_status(True, f"Simulating {b_end:,} / {num_simulations:,} slates...", progress=pct, slate_type=slate_type)
 
     df["optimal_%"] = np.round((counts / num_simulations) * 100, 2)
     df["leverage"] = np.round(df["optimal_%"] / (df["salary"] / 1000), 2)
     return df.sort_values(by="optimal_%", ascending=False)
 
-# --- DETACHED WORKER ---
-def background_task(target_mode, sender, pw, rec):
+def background_task(target_mode, sender, pw, rec, num_sims=6700):
     try:
         set_status(True, f"Scanning for {target_mode}...", progress=5)
         contests_df, draft_group_id, slate_type, slate_title = get_target_slate(target_mode)
@@ -469,7 +462,7 @@ def background_task(target_mode, sender, pw, rec):
         set_status(True, f"Downloading {slate_type} player pool & matchups...", progress=15, slate_name=slate_title, slate_type=slate_type)
         players_df, matchups_df, team_opponents = fetch_player_pool(draft_group_id, slate_type)
 
-        sim_results = run_simulation_pure(players_df, slate_type, team_opponents, num_simulations=17500)
+        sim_results = run_simulation_pure(players_df, slate_type, team_opponents, num_simulations=num_sims)
 
         set_status(True, f"Solving optimal {slate_type} roster...", progress=88, slate_name=slate_title, slate_type=slate_type)
         optimal_roster = solve_slate(sim_results, "proj_fpts", slate_type, team_opponents)
@@ -482,42 +475,53 @@ def background_task(target_mode, sender, pw, rec):
         matchups_df.to_csv(CACHE_MATCHUPS, index=False)
         
         run_ts = get_current_et_str("%Y-%m-%d %I:%M %p ET")
+        email_status_msg = ""
         if sender and pw and rec:
             set_status(True, "Sending email digest...", progress=94, slate_name=slate_title, slate_type=slate_type)
-            send_email_report(optimal_roster, sim_results, matchups_df, slate_title, slate_type, sender, pw, rec)
+            ok, emsg = send_email_report(optimal_roster, sim_results, matchups_df, slate_title, slate_type, sender, pw, rec)
+            email_status_msg = f" | Email: {'Delivered' if ok else emsg}"
+        else:
+            email_status_msg = " | Email: Skipped (no credentials)"
 
-        set_status(False, f"Completed successfully ({slate_type})", progress=100, last_run=run_ts, slate_name=slate_title, slate_type=slate_type)
+        set_status(False, f"Completed successfully ({slate_type}){email_status_msg}", progress=100, last_run=run_ts, slate_name=slate_title, slate_type=slate_type)
     except Exception as e:
         set_status(False, f"Error: {e}", progress=0)
 
-# --- CLI DISPATCH FOR CRON / GITHUB ACTIONS ---
 if len(sys.argv) > 1 and sys.argv[1] == "--cron":
     cron_target = sys.argv[2] if len(sys.argv) > 2 else "Auto-Detect Next Slate"
     s_email = os.environ.get("EMAIL_SENDER", "")
     s_pw = os.environ.get("EMAIL_PASSWORD", "")
     s_rec = os.environ.get("EMAIL_RECIPIENT", "")
-    print(f"Executing scheduled automated run for: {cron_target}")
-    background_task(cron_target, s_email, s_pw, s_rec)
+    background_task(cron_target, s_email, s_pw, s_rec, DEFAULT_SIMULATIONS)
     sys.exit(0)
 
 # --- UI & SIDEBAR ---
 with st.sidebar:
-    st.header("⚙️ Slate Selection")
+    st.header("⚙️ Slate Configuration")
     slate_selection = st.selectbox(
         "Target Game Window",
         [
             "Auto-Detect Next Slate",
-            "Sunday Main Slate (Classic)",
+            "Monday Night Football (Showdown)",
             "Thursday Night Football (Showdown)",
-            "Sunday Night Football (Showdown)",
-            "Monday Night Football (Showdown)"
+            "Sunday Main Slate (Classic)",
+            "Sunday Night Football (Showdown)"
         ]
     )
+    num_simulations = st.number_input("Monte Carlo Sample Size", min_value=1000, max_value=20000, value=6700, step=500)
+
     st.header("📧 Email Notifications")
     send_email = st.checkbox("Email report when simulation runs", value=True)
-    sender_email = st.secrets.get("EMAIL_SENDER", "") if "EMAIL_SENDER" in st.secrets else st.text_input("Sender Gmail", "")
-    sender_pw = st.secrets.get("EMAIL_PASSWORD", "") if "EMAIL_PASSWORD" in st.secrets else st.text_input("Gmail App Password", type="password")
-    recipient_email = st.secrets.get("EMAIL_RECIPIENT", "") if "EMAIL_RECIPIENT" in st.secrets else st.text_input("Recipient Email", "")
+    sender_email = st.secrets.get("EMAIL_SENDER", "") if "EMAIL_SENDER" in st.secrets else ""
+    sender_pw = st.secrets.get("EMAIL_PASSWORD", "") if "EMAIL_PASSWORD" in st.secrets else ""
+    recipient_email = st.secrets.get("EMAIL_RECIPIENT", "") if "EMAIL_RECIPIENT" in st.secrets else ""
+
+    if not sender_email:
+        sender_email = st.text_input("Sender Gmail", "")
+    if not sender_pw:
+        sender_pw = st.text_input("Gmail App Password", type="password")
+    if not recipient_email:
+        recipient_email = st.text_input("Recipient Email", "")
 
 st.title("🏈 DraftKings Slate Scanner & Optimizer")
 
@@ -528,9 +532,13 @@ with col_btn:
     if status["running"]:
         st.button("⏳ Solving in background...", width="stretch", disabled=True)
     else:
-        if st.button("🚀 Run Live 17,500 Simulation", width="stretch", type="primary"):
+        if st.button(f"🚀 Run Live {num_simulations:,} Simulation", width="stretch", type="primary"):
             pw = sender_pw if send_email else ""
-            t = threading.Thread(target=background_task, args=(slate_selection, sender_email, pw, recipient_email), daemon=True)
+            t = threading.Thread(
+                target=background_task,
+                args=(slate_selection, sender_email, pw, recipient_email, int(num_simulations)),
+                daemon=True
+            )
             t.start()
             set_status(True, f"Scanning {slate_selection}...", progress=2)
             st.rerun()
@@ -543,10 +551,10 @@ with col_info:
         time.sleep(1)
         st.rerun()
     else:
-        st.caption(f"Slate: **{status.get('slate_name', 'Main')}** ({status.get('slate_type', 'Classic')}) | Last completed: **{status.get('last_run', 'Never')}**")
+        st.caption(f"Slate: **{status.get('slate_name', 'Main')}** ({status.get('slate_type', 'Classic')}) | Status: **{status.get('msg', 'Idle')}**")
 
 # --- DISPLAY TABS ---
-tab1, tab2, tab3 = st.tabs(["🏆 Weekly Optimal Lineup", "🏟️ Slate Games", "⚡ Simulated Exposures"])
+tab1, tab2, tab3 = st.tabs(["🏆 Optimal Lineup", "🏟️ Slate Games", "⚡ Simulated Exposures"])
 cols_to_display = ["slot", "position", "name", "team", "matchup", "salary", "proj_fpts", "optimal_%", "leverage"]
 
 if os.path.exists(CACHE_ROSTER) and os.path.exists(CACHE_SIM):
@@ -571,7 +579,7 @@ if os.path.exists(CACHE_ROSTER) and os.path.exists(CACHE_SIM):
             st.info("No game data found.")
 
     with tab3:
-        st.header("17,500 Optimal Appearance Rates")
+        st.header("Optimal Appearance Rates")
         col1, col2 = st.columns([1, 3])
         with col1:
             min_opt = st.slider("Minimum Optimal %", 0.0, 40.0, 2.0, step=0.5)
@@ -583,4 +591,4 @@ if os.path.exists(CACHE_ROSTER) and os.path.exists(CACHE_SIM):
         st.dataframe(filtered[valid_cols], width="stretch")
 else:
     with tab1:
-        st.info("No cached run found yet. Choose your target slate in the sidebar and click **Run Live 17,500 Simulation**.")
+        st.info("No cached run found yet. Select your slate in the sidebar and tap **Run Live Simulation**.")
