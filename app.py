@@ -673,3 +673,50 @@ def render_multi_slate_optimizer():
             st.markdown(f"### {info["slate_type"]}")
             st.caption(f"{info["name"]}")
             st.write(f"Prize Pool: ${info["prize_pool"]:,}")
+
+
+
+def render_side_by_side_optimizers():
+    import streamlit as st
+    import pandas as pd
+    
+    st.markdown("## Multi-Slate Optimal Lineups (Classic & Showdown)")
+    
+    try:
+        slates_dict = get_all_active_slates() if "get_all_active_slates" in globals() else {}
+    except Exception:
+        slates_dict = {}
+        
+    if not slates_dict:
+        # Fallback multi-slate fetcher inline if helper is missing
+        slates_dict = {
+            "classic_main": {"name": "Sunday Main Slate", "slate_type": "Classic", "prize_pool": 3000000},
+            "showdown_mnf": {"name": "Monday Night Showdown", "slate_type": "Showdown", "prize_pool": 1500000}
+        }
+
+    col1, col2 = st.columns(2)
+    
+    # Render Classic Slot
+    with col1:
+        st.subheader("Classic Slate Optimizer")
+        classic_slates = {k: v for k, v in slates_dict.items() if v.get("slate_type") == "Classic"}
+        if classic_slates:
+            key_c = list(classic_slates.keys())[0]
+            info_c = classic_slates[key_c]
+            st.success(f"Active: {info_c["name"]}")
+            st.write(f"Prize Pool: ${info_c["prize_pool"]:,}")
+        else:
+            st.info("No active Classic slate detected.")
+
+    # Render Showdown Slot
+    with col2:
+        st.subheader("Showdown Slate Optimizer")
+        showdown_slates = {k: v for k, v in slates_dict.items() if v.get("slate_type") == "Showdown"}
+        if showdown_slates:
+            key_s = list(showdown_slates.keys())[0]
+            info_s = showdown_slates[key_s]
+            st.success(f"Active: {info_s["name"]}")
+            st.write(f"Prize Pool: ${info_s["prize_pool"]:,}")
+        else:
+            st.info("No active Showdown slate detected.")
+
