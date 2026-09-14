@@ -210,6 +210,38 @@ def send_email_report(optimal_roster, sim_results, matchups_df, slate_title, sla
     except Exception as e:
         return False, str(e)
 
+def get_all_optimal_slates(min_fee=0.25):
+    import requests
+    import pandas as pd
+    
+    url = "https://www.draftkings.com/lobby/getcontests?sport=NFL"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        res = requests.get(url, headers=headers, timeout=10).json()
+    except Exception:
+        return {}
+
+    slates_map = {}
+    for c in res.get("Contests", []):
+        fee = float(c.get("a", 0))
+        dg = c.get("dg")
+        name = c.get("n", "")
+        game_type = c.get("gameType", "")
+        is_sd = "showdown" in name.lower() or "single game" in name.lower() or game_type in ["Showdown", "SingleGame"]
+        
+        if fee >= min_fee and dg:
+            slate_type = "Showdown" if is_sd else "Classic"
+            # Keep the highest prize pool contest per draft group / slate type
+            if dg not in [s.get("dg") for s in slates_map.values()]:
+                slates_map[dg] = {
+                    "draft_group_id": dg,
+                    "name": name,
+                    "slate_type": slate_type,
+                    "prize_pool": float(c.get("po", 0))
+                }
+    return slates_map
+
+
 def get_target_slate(target_mode="Auto-Detect Next Slate", min_fee=0.25):
     url = "https://www.draftkings.com/lobby/getcontests?sport=NFL"
     headers = {"User-Agent": "Mozilla/5.0"}
