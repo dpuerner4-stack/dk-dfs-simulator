@@ -169,7 +169,7 @@ def generate_email_html(optimal_roster, sim_results, matchups_df, slate_title, s
                     </div>
                 </div>
 
-                <h3>🏆 Optimal Lineup</h3>
+                <h3>🏆 Optimal Lineup (1 CPT + 5 FLEX)</h3>
                 <table class="table-wrap">
                     <thead>
                         <tr><th>Slot</th><th>Player</th><th>Pos</th><th>Team</th><th>Matchup</th><th>Salary</th><th>Fpts</th><th>Opt %</th><th>Lev</th></tr>
@@ -283,23 +283,34 @@ def get_target_slate(target_mode="Auto-Detect Next Slate"):
     slate_type = "Showdown" if best["is_showdown"] else "Classic"
     return best["draft_group_id"], slate_type, best["name"]
 
-def estimate_projection(name, pos, salary, raw_fppg):
+# --- ACCURATE PROJECTION ENGINE & STARTER FILTER ---
+def calculate_true_projection(p, starting_qbs):
+    name = p["name"]
+    pos = p["position"]
+    team = p["team"]
+    sal = p["salary"]
+    raw_fppg = p["raw_fppg"]
+
+    # Rule 1: Eliminate Backup QBs who are not the designated starter
+    if pos == "QB":
+        if team in starting_qbs and name != starting_qbs[team]:
+            return 0.0  # Backup QB gets zero points
+        return max(raw_fppg, 18.5)
+
     if raw_fppg and raw_fppg > 4.0:
         return float(raw_fppg)
-    
-    # Meaningful salary tier model
-    if salary >= 11000:
-        return round(17.5 + (salary - 11000) * 0.0011, 1)
-    elif salary >= 8000:
-        return round(12.0 + (salary - 8000) * 0.0014, 1)
-    elif salary >= 5000:
-        return round(7.5 + (salary - 5000) * 0.0013, 1)
-    elif salary >= 2500:
-        return round(4.0 + (salary - 2500) * 0.0012, 1)
-    elif salary >= 1000:
-        return round(1.5 + (salary - 1000) * 0.0010, 1)
+
+    # Rule 2: Salary tiers based on active player usage
+    if sal >= 10000:
+        return round(15.0 + (sal - 10000) * 0.0012, 1)
+    elif sal >= 7000:
+        return round(10.5 + (sal - 7000) * 0.0013, 1)
+    elif sal >= 4500:
+        return round(6.5 + (sal - 4500) * 0.0014, 1)
+    elif sal >= 2000:
+        return round(3.5 + (sal - 2000) * 0.0012, 1)
     else:
-        return 0.1
+        return 0.2
 
 def fetch_player_pool(draft_group_id, slate_type):
     url = f"https://api.draftkings.com/draftgroups/v1/draftgroups/{draft_group_id}/draftables?format=json"
@@ -319,8 +330,7 @@ def fetch_player_pool(draft_group_id, slate_type):
 
     matchups_df = pd.DataFrame(matchups)
     raw_players = res.get("draftables", [])
-    
-    # Deduplicate base flex records
+
     player_dict = {}
     for p in raw_players:
         if p.get("status", "None") in ["O", "IR", "D", "PUP", "SUS"]:
@@ -328,7 +338,7 @@ def fetch_player_pool(draft_group_id, slate_type):
         sal = float(p.get("salary", 0))
         if sal <= 0:
             continue
-        
+
         name = p.get("displayName") or f"{p.get('firstName', '')} {p.get('lastName', '')}".strip()
         team = p.get("teamAbbreviation", "")
         matchup = p.get("competition", {}).get("name", "")
@@ -367,12 +377,23 @@ def fetch_player_pool(draft_group_id, slate_type):
     if not base_list:
         raise ValueError("No active players available for this slate.")
 
+    # Determine highest salaried QB on each team as the true starter
+    starting_qbs = {}
+    for p in base_list:
+        if p["position"] == "QB":
+            t = p["team"]
+            if t not in starting_qbs or p["salary"] > starting_qbs[t]["salary"]:
+                starting_qbs[t] = p
+    starting_qb_names = {t: q["name"] for t, q in starting_qbs.items()}
+
     entries = []
     if slate_type == "Showdown":
         for p in base_list:
-            proj = estimate_projection(p["name"], p["position"], p["salary"], p["raw_fppg"])
-            
-            # FLEX entry (1.0x salary, 1.0x points)
+            proj = calculate_true_projection(p, starting_qb_names)
+            if proj <= 0.0:
+                continue
+
+            # FLEX Row (1.0x)
             entries.append({
                 "player_id": p["player_id"],
                 "name": p["name"],
@@ -383,8 +404,8 @@ def fetch_player_pool(draft_group_id, slate_type):
                 "salary": int(p["salary"]),
                 "proj_fpts": proj
             })
-            
-            # CPT entry (1.5x salary, 1.5x points)
+
+            # CPT Row (1.5x salary, 1.5x score)
             entries.append({
                 "player_id": p["player_id"],
                 "name": p["name"],
@@ -397,7 +418,9 @@ def fetch_player_pool(draft_group_id, slate_type):
             })
     else:
         for p in base_list:
-            proj = estimate_projection(p["name"], p["position"], p["salary"], p["raw_fppg"])
+            proj = calculate_true_projection(p, starting_qb_names)
+            if proj <= 0.0:
+                continue
             entries.append({
                 "player_id": p["player_id"],
                 "name": p["name"],
@@ -415,7 +438,7 @@ def fetch_player_pool(draft_group_id, slate_type):
 
     return pool_df.reset_index(drop=True), matchups_df, team_opponents
 
-# --- SOLVER ---
+# --- EXACT MATHEMATICAL SOLVER ---
 def solve_lineup(df, scores, slate_type, team_opponents=None):
     solver = pywraplp.Solver.CreateSolver("CBC")
     if not solver:
@@ -428,7 +451,7 @@ def solve_lineup(df, scores, slate_type, team_opponents=None):
         obj.SetCoefficient(x[i], float(scores[i]))
     obj.SetMaximization()
 
-    # Salary Cap <= $50,000
+    # Total Salary <= $50,000
     sal_ct = solver.Constraint(0, 50000)
     for i in range(n):
         sal_ct.SetCoefficient(x[i], int(df.loc[i, "salary"]))
@@ -446,14 +469,23 @@ def solve_lineup(df, scores, slate_type, team_opponents=None):
             else:
                 flex_ct.SetCoefficient(x[i], 1)
 
-        # Mutual Exclusion: Same player cannot be drafted twice
+        # Mutual Exclusion: Same player cannot be drafted as both CPT and FLEX
         for pid, indices in df.groupby("player_id").groups.items():
             if len(indices) > 1:
                 p_ct = solver.Constraint(0, 1)
                 for idx in indices:
                     p_ct.SetCoefficient(x[idx], 1)
 
-        # Team diversity: At least 1 player from each team (Max 5)
+        # Never draft 2 QBs from the SAME team in Showdown
+        for tm in df["team"].unique():
+            if not tm: continue
+            tm_qb_indices = df[(df["team"] == tm) & (df["position"] == "QB")].index.tolist()
+            if len(tm_qb_indices) > 1:
+                qb_tm_ct = solver.Constraint(0, 1)
+                for idx in tm_qb_indices:
+                    qb_tm_ct.SetCoefficient(x[idx], 1)
+
+        # Team representation: Both teams must have at least 1 player (Max 5 per team)
         teams = [t for t in df["team"].unique() if t]
         if len(teams) >= 2:
             for tm in teams:
@@ -647,7 +679,7 @@ with col_info:
         st.caption(f"Slate: **{status.get('slate_name', 'Showdown')}** ({status.get('slate_type', 'Showdown')}) | Status: **{status.get('msg', 'Idle')}**")
 
 # --- TABLES ---
-tab1, tab2, tab3 = tab1, tab2, tab3 = st.tabs(["🏆 Optimal Lineup", "🏟️ Slate Games", "⚡ Simulated Exposures"])
+tab1, tab2, tab3 = st.tabs(["🏆 Optimal Lineup", "🏟️ Slate Games", "⚡ Simulated Exposures"])
 cols_to_display = ["roster_slot", "name", "position", "team", "matchup", "salary", "proj_fpts", "optimal_%", "leverage"]
 
 if os.path.exists(CACHE_ROSTER) and os.path.exists(CACHE_SIM):
