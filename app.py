@@ -68,7 +68,7 @@ def generate_email_html(optimal_roster, sim_results, matchups_df, slate_title, s
 
     matchup_badges = ""
     if isinstance(matchups_df, pd.DataFrame) and not matchups_df.empty:
-        for _, row in matchups_df.iterrows():
+        for _, row in matchups_df.iterrows() if hasattr(matchups_df, "iterrows") else []:
             matchup_badges += f"""
             <span style="display: inline-block; background-color: #f1f3f5; border: 1px solid #dee2e6; border-radius: 6px; padding: 6px 12px; margin: 4px; font-weight: 600; font-size: 13px; color: #343a40;">
                 🏈 {row['matchup']} &nbsp;<span style="font-weight: 400; color: #6c757d;">({row.get('start_time_et', 'TBD')})</span>
