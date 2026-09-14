@@ -262,7 +262,7 @@ def get_all_optimal_slates(min_fee=0.25):
         if fee >= min_fee and dg:
             slate_type = "Showdown" if is_sd else "Classic"
             # Keep the highest prize pool contest per draft group / slate type
-            if dg not in [s.get("dg") for s in slates_map.values()()]:
+            if dg not in [s.get("dg") for s in slates_map.values()]:
                 slates_map[dg] = {
                     "draft_group_id": dg,
                     "name": name,
