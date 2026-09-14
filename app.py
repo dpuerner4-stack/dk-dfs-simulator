@@ -644,7 +644,7 @@ if os.path.exists(CACHE_ROSTER) and os.path.exists(CACHE_SIM):
         with col1:
             min_opt = st.slider("Minimum Optimal %", 0.0, 40.0, 2.0, step=0.5)
         with col2:
-            default_pos = [p for p in ["CPT", "FLEX", "QB", "RB", "WR", "TE", "DST"] if p in sim_df["position"].values]
+            default_pos = [p for p in ["CPT", "FLEX", "QB", "RB", "WR", "TE", "DST"] if p in sim_df["position"].tolist()]
             pos_filter = st.multiselect("Filter Positions", sim_df["position"].unique().tolist(), default=default_pos)
         valid_cols = [c for c in cols_to_display if c in sim_df.columns]
         filtered = sim_df[(sim_df["optimal_%"] >= min_opt) & (sim_df["position"].isin(pos_filter))]
