@@ -1,33 +1,3 @@
-
-def get_all_active_slates(min_fee=0.25):
-    import requests
-    import pandas as pd
-    url = "https://www.draftkings.com/lobby/getcontests?sport=NFL"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        res = requests.get(url, headers=headers, timeout=10).json()
-    except Exception:
-        return {}
-
-    slates = {}
-    for c in res.get("Contests", []):
-        fee = float(c.get("a", 0))
-        dg = c.get("dg")
-        name = c.get("n", "")
-        game_type = c.get("gameType", "")
-        is_sd = "showdown" in name.lower() or "single game" in name.lower() or game_type in ["Showdown", "SingleGame"]
-        
-        if fee >= min_fee and dg:
-            stype = "Showdown" if is_sd else "Classic"
-            if dg not in slates:
-                slates[dg] = {
-                    "draft_group_id": dg,
-                    "name": name,
-                    "slate_type": stype,
-                    "prize_pool": float(c.get("po", 0))
-                }
-    return slates
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -98,7 +68,7 @@ def generate_email_html(optimal_roster, sim_results, matchups_df, slate_title, s
 
     matchup_badges = ""
     if isinstance(matchups_df, pd.DataFrame) and not matchups_df.empty:
-        for _, row in matchups_df.iterrows() if hasattr(matchups_df, "iterrows") else []:
+        for _, row in matchups_df.iterrows():
             matchup_badges += f"""
             <span style="display: inline-block; background-color: #f1f3f5; border: 1px solid #dee2e6; border-radius: 6px; padding: 6px 12px; margin: 4px; font-weight: 600; font-size: 13px; color: #343a40;">
                 🏈 {row['matchup']} &nbsp;<span style="font-weight: 400; color: #6c757d;">({row.get('start_time_et', 'TBD')})</span>
@@ -240,38 +210,6 @@ def send_email_report(optimal_roster, sim_results, matchups_df, slate_title, sla
     except Exception as e:
         return False, str(e)
 
-def get_all_optimal_slates(min_fee=0.25):
-    import requests
-    import pandas as pd
-    
-    url = "https://www.draftkings.com/lobby/getcontests?sport=NFL"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        res = requests.get(url, headers=headers, timeout=10).json()
-    except Exception:
-        return {}
-
-    slates_map = {}
-    for c in res.get("Contests", []):
-        fee = float(c.get("a", 0))
-        dg = c.get("dg")
-        name = c.get("n", "")
-        game_type = c.get("gameType", "")
-        is_sd = "showdown" in name.lower() or "single game" in name.lower() or game_type in ["Showdown", "SingleGame"]
-        
-        if fee >= min_fee and dg:
-            slate_type = "Showdown" if is_sd else "Classic"
-            # Keep the highest prize pool contest per draft group / slate type
-            if dg not in [s.get("dg") for s in slates_map.values()]:
-                slates_map[dg] = {
-                    "draft_group_id": dg,
-                    "name": name,
-                    "slate_type": slate_type,
-                    "prize_pool": float(c.get("po", 0))
-                }
-    return slates_map
-
-
 def get_target_slate(target_mode="Auto-Detect Next Slate", min_fee=0.25):
     url = "https://www.draftkings.com/lobby/getcontests?sport=NFL"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -354,7 +292,7 @@ def fetch_player_pool(draft_group_id, slate_type):
             continue
 
         raw_pos = p.get("position") or "UTIL"
-        roster_slot = p.get("rosterSlotId") # 65 = CPT in DK API
+        roster_slot = p.get("rosterSlotId")
         name = p.get("displayName") or f"{p.get('firstName', '')} {p.get('lastName', '')}".strip()
         team = p.get("teamAbbreviation", "")
         matchup = p.get("competition", {}).get("name", "")
@@ -371,8 +309,7 @@ def fetch_player_pool(draft_group_id, slate_type):
         if fppg <= 0.0:
             fppg = round(salary / 450.0, 2)
 
-        # In DK Showdown feeds, raw rosterSlotId 65 or position 'CPT' indicates Captain
-        is_cpt = (roster_slot == 65) or (raw_pos == "CPT") or (salary > 10000 and "CPT" in str(p.get("rosterSlots", [])))
+        is_cpt = (roster_slot == 65) or (raw_pos == "CPT")
 
         players.append({
             "player_id": p_id,
@@ -391,7 +328,6 @@ def fetch_player_pool(draft_group_id, slate_type):
 
     df = pd.DataFrame(players).drop_duplicates(subset=["player_id", "roster_slot"])
 
-    # If Showdown slate but DK only provided base entries, duplicate entries as CPT with 1.5x multiplier
     if slate_type == "Showdown" and not any(df["roster_slot"] == "CPT"):
         cpt_df = df.copy()
         cpt_df["roster_slot"] = "CPT"
@@ -401,7 +337,6 @@ def fetch_player_pool(draft_group_id, slate_type):
 
     df["proj_fpts"] = pd.to_numeric(df["fppg"], errors="coerce").fillna(df["salary"] / 450.0)
 
-    # Captain slot bonus calculation
     if slate_type == "Showdown":
         df.loc[df["roster_slot"] == "CPT", "proj_fpts"] = df.loc[df["roster_slot"] == "CPT", "proj_fpts"] * 1.5
 
@@ -414,73 +349,99 @@ def fetch_player_pool(draft_group_id, slate_type):
     return df.reset_index(drop=True), matchups_df, team_opponents
 
 def solve_slate(df, score_column, slate_type, team_opponents=None):
-    import pulp
-    import pandas as pd
-    
-    if df is None or not isinstance(df, pd.DataFrame) or len(df) == 0:
-        return pd.DataFrame()
-    
-    df = df.reset_index(drop=True)
-    import pulp
-    import pandas as pd
-    
-    df = df.reset_index(drop=True)
-    if len(df) == 0:
-        return pd.DataFrame()
-
-    # Safe projection floor filter
-    if score_column in df.columns:
-        df = df[df[score_column] >= 3.0].copy()
-
-    # Safe backup QB filter
-    pos_col = next((c for c in df.columns if str(c).lower() in ["position", "pos"]), None)
-    if pos_col and score_column in df.columns:
-        df = df[~((df[pos_col].astype(str).str.upper() == "QB") & (df[score_column] < 12.0))].copy()
-
-    df = df.reset_index(drop=True)
+    solver = pywraplp.Solver.CreateSolver("CBC")
+    if not solver:
+        return None
     n = len(df)
-    if n == 0:
-        return pd.DataFrame()
+    x = [solver.BoolVar(f"x_{i}") for i in range(n)]
 
-    prob = pulp.LpProblem("DK_Solver", pulp.LpMaximize)
-    x = [pulp.LpVariable(f"x_{i}", cat=pulp.LpBinary) for i in range(n)]
+    obj = solver.Objective()
+    for i in range(n):
+        obj.SetCoefficient(x[i], float(df.loc[i, score_column]))
+    obj.SetMaximization()
 
-    # Objective function
-    prob += pulp.lpSum([float(df.loc[i, score_column]) * x[i] for i in range(n) if score_column in df.columns])
-
-    # Salary cap ($50,000)
-    sal_col = next((c for c in df.columns if str(c).lower() == "salary"), "salary")
-    if sal_col in df.columns:
-        prob += pulp.lpSum([float(df.loc[i, sal_col]) * x[i] for i in range(n)]) <= 50000
+    sal_ct = solver.Constraint(0, 50000)
+    for i in range(n):
+        sal_ct.SetCoefficient(x[i], int(df.loc[i, "salary"]))
 
     if slate_type == "Showdown":
-        prob += pulp.lpSum([x[i] for i in range(n)]) == 6
+        tot_ct = solver.Constraint(6, 6)
+        cpt_ct = solver.Constraint(1, 1)
+        flex_ct = solver.Constraint(5, 5)
 
-        # Identify Captain vs Flex rows safely
-        slot_col = next((c for c in df.columns if str(c).lower() in ["roster_slot", "slot", "rosterslot"]), None)
-        if slot_col:
-            cpt_indices = [i for i in range(n) if str(df.loc[i, slot_col]).upper() == "CPT" or (pos_col and str(df.loc[i, pos_col]).upper() == "CPT")]
-        else:
-            cpt_indices = [i for i in range(n) if pos_col and str(df.loc[i, pos_col]).upper() == "CPT"]
-            
-        flex_indices = [i for i in range(n) if i not in cpt_indices]
+        for i, slot in enumerate(df["roster_slot"]):
+            tot_ct.SetCoefficient(x[i], 1)
+            if slot == "CPT":
+                cpt_ct.SetCoefficient(x[i], 1)
+            else:
+                flex_ct.SetCoefficient(x[i], 1)
 
-        if cpt_indices:
-            prob += pulp.lpSum([x[i] for i in cpt_indices]) == 1
-        if flex_indices:
-            prob += pulp.lpSum([x[i] for i in flex_indices]) == 5
+        player_groups = df.groupby("player_id").groups
+        for pid, indices in player_groups.items():
+            if len(indices) > 1:
+                p_ct = solver.Constraint(0, 1)
+                for idx in indices:
+                    p_ct.SetCoefficient(x[idx], 1)
 
-        # Mutual exclusion per player name
-        name_col = next((c for c in df.columns if str(c).lower() in ["name", "player", "player name"]), df.columns[0])
-        for name, group in df.groupby(name_col):
-            idxs = group.index.tolist()
-            if len(idxs) > 1:
-                prob += pulp.lpSum([x[i] for i in idxs]) <= 1
+        teams = [t for t in df["team"].unique() if t]
+        if len(teams) >= 2:
+            for tm in teams:
+                tm_ct = solver.Constraint(1, 5)
+                for i in range(n):
+                    if df.loc[i, "team"] == tm:
+                        tm_ct.SetCoefficient(x[i], 1)
     else:
-        prob += pulp.lpSum([x[i] for i in range(n)]) == 9
+        qb_ct = solver.Constraint(1, 1)
+        dst_ct = solver.Constraint(1, 1)
+        rb_ct = solver.Constraint(2, 3)
+        wr_ct = solver.Constraint(3, 4)
+        te_ct = solver.Constraint(1, 2)
+        flex_ct = solver.Constraint(7, 7)
+        tot_ct = solver.Constraint(9, 9)
 
-    prob.solve(pulp.PULP_CBC_CMD(msg=0))
-    return [i for i in range(n) if pulp.value(x[i]) > 0.5]
+        for i, pos in enumerate(df["position"]):
+            tot_ct.SetCoefficient(x[i], 1)
+            if pos == "QB": qb_ct.SetCoefficient(x[i], 1)
+            elif pos == "DST": dst_ct.SetCoefficient(x[i], 1)
+            elif pos == "RB": rb_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
+            elif pos == "WR": wr_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
+            elif pos == "TE": te_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
+
+        qbs = df[df["position"] == "QB"]
+        for _, qb_row in qbs.iterrows():
+            qb_idx = qb_row.name
+            team = qb_row["team"]
+            stack_partners = df[(df["team"] == team) & (df["position"].isin(["WR", "TE"]))].index.tolist()
+            if stack_partners:
+                stack_ct = solver.Constraint(0, solver.infinity())
+                stack_ct.SetCoefficient(x[qb_idx], -1)
+                for partner_idx in stack_partners:
+                    stack_ct.SetCoefficient(x[partner_idx], 1)
+
+        if team_opponents:
+            for _, qb_row in qbs.iterrows():
+                qb_idx = qb_row.name
+                opp_team = team_opponents.get(qb_row["team"])
+                if opp_team:
+                    opp_dsts = df[(df["team"] == opp_team) & (df["position"] == "DST")].index.tolist()
+                    for dst_idx in opp_dsts:
+                        anti_ct = solver.Constraint(0, 1)
+                        anti_ct.SetCoefficient(x[qb_idx], 1)
+                        anti_ct.SetCoefficient(x[dst_idx], 1)
+
+    status = solver.Solve()
+    if status in [pywraplp.Solver.OPTIMAL, pywraplp.Solver.FEASIBLE]:
+        selected = [i for i in range(n) if x[i].solution_value() > 0.5]
+        lineup = df.loc[selected].copy()
+        if slate_type == "Showdown":
+            lineup["slot"] = lineup["roster_slot"]
+            lineup["order"] = lineup["roster_slot"].map(lambda p: 0 if p == "CPT" else 1)
+        else:
+            pos_order = {"QB": 1, "RB": 2, "WR": 3, "TE": 4, "DST": 5}
+            lineup["slot"] = lineup["position"]
+            lineup["order"] = lineup["position"].map(lambda p: pos_order.get(p, 9))
+        return lineup.sort_values(by="order").drop(columns=["order"])
+    return None
 
 def run_simulation_pure(df, slate_type, team_opponents, num_simulations=6700):
     n = len(df)
@@ -495,8 +456,8 @@ def run_simulation_pure(df, slate_type, team_opponents, num_simulations=6700):
         for s in range(b_start, b_end):
             df["sim_score"] = sim_matrix[s]
             res = solve_slate(df, "sim_score", slate_type, team_opponents)
-            if res is not None:
-                for idx in res:
+            if res is not None and isinstance(res, pd.DataFrame):
+                for idx in res.index:
                     counts[idx] += 1
 
         pct = 15 + int((b_end / num_simulations) * 70)
@@ -522,11 +483,10 @@ def background_task(target_mode, sender, pw, rec, num_sims=6700):
         set_status(True, f"Solving optimal {slate_type} roster...", progress=88, slate_name=slate_title, slate_type=slate_type)
         optimal_roster = solve_slate(sim_results, "proj_fpts", slate_type, team_opponents)
         
-        # Fallback if team constraint was too tight for early incomplete feed
-        if optimal_roster is None or optimal_roster.empty:
+        if optimal_roster is None or (isinstance(optimal_roster, pd.DataFrame) and optimal_roster.empty):
             optimal_roster = solve_slate(sim_results, "proj_fpts", slate_type, None)
 
-        if optimal_roster is None or optimal_roster.empty:
+        if optimal_roster is None or (isinstance(optimal_roster, pd.DataFrame) and optimal_roster.empty):
             set_status(False, "Failed to resolve optimal roster within cap constraints.", progress=0)
             return
 
@@ -644,7 +604,7 @@ if os.path.exists(CACHE_ROSTER) and os.path.exists(CACHE_SIM):
         with col1:
             min_opt = st.slider("Minimum Optimal %", 0.0, 40.0, 2.0, step=0.5)
         with col2:
-            default_pos = [p for p in ["CPT", "FLEX", "QB", "RB", "WR", "TE", "DST"] if p in sim_df["position"].tolist()]
+            default_pos = [p for p in ["CPT", "FLEX", "QB", "RB", "WR", "TE", "DST"] if p in sim_df["position"].values]
             pos_filter = st.multiselect("Filter Positions", sim_df["position"].unique().tolist(), default=default_pos)
         valid_cols = [c for c in cols_to_display if c in sim_df.columns]
         filtered = sim_df[(sim_df["optimal_%"] >= min_opt) & (sim_df["position"].isin(pos_filter))]
@@ -652,71 +612,3 @@ if os.path.exists(CACHE_ROSTER) and os.path.exists(CACHE_SIM):
 else:
     with tab1:
         st.info("No cached run found yet. Select your slate in the sidebar and tap **Run Live Simulation**.")
-
-
-def render_multi_slate_optimizer():
-    import streamlit as st
-    st.subheader("Multi-Slate Optimal Lineups (Classic & Showdown)")
-    # Fetch active contests and group by format
-    try:
-        slates = get_all_active_slates() if "get_all_active_slates" in globals() else {}
-    except Exception:
-        slates = {}
-        
-    if not slates:
-        st.info("Scanning lobby for active Classic and Showdown slates...")
-        return
-
-    cols = st.columns(len(slates) if len(slates) > 0 else 1)
-    for idx, (dg, info) in enumerate(slates.items()):
-        with cols[idx % len(cols)]:
-            st.markdown(f"### {info["slate_type"]}")
-            st.caption(f"{info["name"]}")
-            st.write(f"Prize Pool: ${info["prize_pool"]:,}")
-
-
-
-def render_side_by_side_optimizers():
-    import streamlit as st
-    import pandas as pd
-    
-    st.markdown("## Multi-Slate Optimal Lineups (Classic & Showdown)")
-    
-    try:
-        slates_dict = get_all_active_slates() if "get_all_active_slates" in globals() else {}
-    except Exception:
-        slates_dict = {}
-        
-    if not slates_dict:
-        # Fallback multi-slate fetcher inline if helper is missing
-        slates_dict = {
-            "classic_main": {"name": "Sunday Main Slate", "slate_type": "Classic", "prize_pool": 3000000},
-            "showdown_mnf": {"name": "Monday Night Showdown", "slate_type": "Showdown", "prize_pool": 1500000}
-        }
-
-    col1, col2 = st.columns(2)
-    
-    # Render Classic Slot
-    with col1:
-        st.subheader("Classic Slate Optimizer")
-        classic_slates = {k: v for k, v in slates_dict.items() if v.get("slate_type") == "Classic"}
-        if classic_slates:
-            key_c = list(classic_slates.keys()())[0]
-            info_c = classic_slates[key_c]
-            st.success(f"Active: {info_c["name"]}")
-            st.write(f"Prize Pool: ${info_c["prize_pool"]:,}")
-        else:
-            st.info("No active Classic slate detected.")
-
-    # Render Showdown Slot
-    with col2:
-        st.subheader("Showdown Slate Optimizer")
-        showdown_slates = {k: v for k, v in slates_dict.items() if v.get("slate_type") == "Showdown"}
-        if showdown_slates:
-            key_s = list(showdown_slates.keys()())[0]
-            info_s = showdown_slates[key_s]
-            st.success(f"Active: {info_s["name"]}")
-            st.write(f"Prize Pool: ${info_s["prize_pool"]:,}")
-        else:
-            st.info("No active Showdown slate detected.")
-
