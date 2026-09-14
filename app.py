@@ -356,6 +356,24 @@ def solve_slate(df, score_column, slate_type, team_opponents=None):
     import pandas as pd
     
     df = df.reset_index(drop=True)
+    
+    # === BACKUP QB & PHANTOM PUNT PLAYER FILTERS ===
+    # 1. Remove sub-threshold low projection noise
+    if score_column in df.columns:
+        df = df[df[score_column] >= 3.0].copy()
+    
+    # 2. Hard filter: Strip backup QBs with low projections (not starting)
+    if "position" in df.columns and score_column in df.columns:
+        df = df[~((df["position"].str.upper() == "QB") & (df[score_column] < 12.0))].copy()
+    
+    df = df.reset_index(drop=True)
+    n = len(df)
+    if n == 0:
+        return []
+    import pulp
+    import pandas as pd
+    
+    df = df.reset_index(drop=True)
     n = len(df)
     if n == 0:
         return []
