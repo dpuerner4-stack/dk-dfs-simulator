@@ -418,7 +418,7 @@ def solve_slate(df, score_column, slate_type, team_opponents=None):
     import pandas as pd
     
     if df is None or not isinstance(df, pd.DataFrame) or len(df) == 0:
-        return []
+        return pd.DataFrame()
     
     df = df.reset_index(drop=True)
     import pulp
@@ -426,7 +426,7 @@ def solve_slate(df, score_column, slate_type, team_opponents=None):
     
     df = df.reset_index(drop=True)
     if len(df) == 0:
-        return []
+        return pd.DataFrame()
 
     # Safe projection floor filter
     if score_column in df.columns:
@@ -440,7 +440,7 @@ def solve_slate(df, score_column, slate_type, team_opponents=None):
     df = df.reset_index(drop=True)
     n = len(df)
     if n == 0:
-        return []
+        return pd.DataFrame()
 
     prob = pulp.LpProblem("DK_Solver", pulp.LpMaximize)
     x = [pulp.LpVariable(f"x_{i}", cat=pulp.LpBinary) for i in range(n)]
