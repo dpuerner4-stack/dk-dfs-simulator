@@ -1,0 +1,38 @@
+name: Weekly NFL DFS Automated Optimizer
+
+on:
+  schedule:
+    # Thursdays at 21:30 UTC = 5:30 PM Eastern (TNF Showdown)
+    - cron: '30 21 * * 4'
+    # Sundays at 14:30 UTC = 10:30 AM Eastern (Sunday Main Slate Classic)
+    - cron: '30 14 * * 0'
+    # Sundays at 22:30 UTC = 6:30 PM Eastern (SNF Showdown)
+    - cron: '30 22 * * 0'
+    # Mondays at 21:30 UTC = 5:30 PM Eastern (MNF Showdown)
+    - cron: '30 21 * * 1'
+  workflow_dispatch:
+
+jobs:
+  run-dfs-optimizer:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Execute Live Slate Simulation & Deliver Report
+        env:
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
+        run: |
+          python3 app.py --cron "Auto-Detect Next Slate"
