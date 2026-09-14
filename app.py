@@ -83,9 +83,11 @@ def generate_email_html(optimal_roster, sim_results, matchups_df, slate_title, s
         badge_color = pos_colors.get(slot, "#adb5bd")
         text_color = "#000000" if slot in ["WR", "RB", "TE", "CPT", "FLEX"] else "#ffffff"
         
+        crown = "👑 " if slot == "CPT" else ""
+        
         lineup_rows += f"""
         <tr style="background-color: {bg}; border-bottom: 1px solid #e9ecef; text-align: left; font-size: 13px;">
-            <td style="padding: 10px 12px;"><span style="background-color: {badge_color}; color: {text_color}; font-weight: 700; border-radius: 4px; padding: 3px 8px; font-size: 11px;">{slot}</span></td>
+            <td style="padding: 10px 12px;"><span style="background-color: {badge_color}; color: {text_color}; font-weight: 700; border-radius: 4px; padding: 3px 8px; font-size: 11px;">{crown}{slot}</span></td>
             <td style="padding: 10px 12px; font-weight: 600; color: #212529;">{row.get('name', '')}</td>
             <td style="padding: 10px 12px; color: #495057;">{row.get('position', '')}</td>
             <td style="padding: 10px 12px; color: #495057;">{row.get('team', '')}</td>
@@ -101,15 +103,15 @@ def generate_email_html(optimal_roster, sim_results, matchups_df, slate_title, s
     exposure_rows = ""
     for idx, row in top_exposures.reset_index().iterrows():
         bg = "#ffffff" if idx % 2 == 0 else "#f8f9fa"
-        pos = str(row.get("position", ""))
-        badge_color = pos_colors.get(pos, "#adb5bd")
-        text_color = "#000000" if pos in ["WR", "RB", "TE", "CPT", "FLEX"] else "#ffffff"
+        slot = str(row.get("roster_slot", ""))
+        badge_color = pos_colors.get(slot, "#adb5bd")
+        text_color = "#000000" if slot in ["WR", "RB", "TE", "CPT", "FLEX"] else "#ffffff"
 
         exposure_rows += f"""
         <tr style="background-color: {bg}; border-bottom: 1px solid #e9ecef; text-align: left; font-size: 13px;">
-            <td style="padding: 10px 12px;"><span style="background-color: {badge_color}; color: {text_color}; font-weight: 700; border-radius: 4px; padding: 3px 8px; font-size: 11px;">{row.get('roster_slot', pos)}</span></td>
+            <td style="padding: 10px 12px;"><span style="background-color: {badge_color}; color: {text_color}; font-weight: 700; border-radius: 4px; padding: 3px 8px; font-size: 11px;">{slot}</span></td>
             <td style="padding: 10px 12px; font-weight: 600; color: #212529;">{row.get('name', '')}</td>
-            <td style="padding: 10px 12px; color: #495057;">{pos}</td>
+            <td style="padding: 10px 12px; color: #495057;">{row.get('position', '')}</td>
             <td style="padding: 10px 12px; color: #495057;">{row.get('team', '')}</td>
             <td style="padding: 10px 12px; font-weight: 600; color: #198754;">${int(row.get('salary', 0)):,}</td>
             <td style="padding: 10px 12px;">{float(row.get('proj_fpts', 0)):.1f}</td>
@@ -283,7 +285,7 @@ def get_target_slate(target_mode="Auto-Detect Next Slate"):
     slate_type = "Showdown" if best["is_showdown"] else "Classic"
     return best["draft_group_id"], slate_type, best["name"]
 
-# --- ACCURATE PROJECTION ENGINE & STARTER FILTER ---
+# --- PROJECTION ENGINE & STARTER FILTER ---
 def calculate_true_projection(p, starting_qbs):
     name = p["name"]
     pos = p["position"]
@@ -291,16 +293,16 @@ def calculate_true_projection(p, starting_qbs):
     sal = p["salary"]
     raw_fppg = p["raw_fppg"]
 
-    # Rule 1: Eliminate Backup QBs who are not the designated starter
+    # Eliminate Backup QBs
     if pos == "QB":
         if team in starting_qbs and name != starting_qbs[team]:
-            return 0.0  # Backup QB gets zero points
+            return 0.0
         return max(raw_fppg, 18.5)
 
     if raw_fppg and raw_fppg > 4.0:
         return float(raw_fppg)
 
-    # Rule 2: Salary tiers based on active player usage
+    # Active player tier projection
     if sal >= 10000:
         return round(15.0 + (sal - 10000) * 0.0012, 1)
     elif sal >= 7000:
@@ -377,7 +379,6 @@ def fetch_player_pool(draft_group_id, slate_type):
     if not base_list:
         raise ValueError("No active players available for this slate.")
 
-    # Determine highest salaried QB on each team as the true starter
     starting_qbs = {}
     for p in base_list:
         if p["position"] == "QB":
@@ -393,7 +394,7 @@ def fetch_player_pool(draft_group_id, slate_type):
             if proj <= 0.0:
                 continue
 
-            # FLEX Row (1.0x)
+            # 1. FLEX entry (1.0x)
             entries.append({
                 "player_id": p["player_id"],
                 "name": p["name"],
@@ -405,7 +406,7 @@ def fetch_player_pool(draft_group_id, slate_type):
                 "proj_fpts": proj
             })
 
-            # CPT Row (1.5x salary, 1.5x score)
+            # 2. CPT entry (1.5x salary, 1.5x score)
             entries.append({
                 "player_id": p["player_id"],
                 "name": p["name"],
@@ -438,7 +439,7 @@ def fetch_player_pool(draft_group_id, slate_type):
 
     return pool_df.reset_index(drop=True), matchups_df, team_opponents
 
-# --- EXACT MATHEMATICAL SOLVER ---
+# --- EXACT MATHEMATICAL SOLVER (STRICT CPT ENFORCEMENT) ---
 def solve_lineup(df, scores, slate_type, team_opponents=None):
     solver = pywraplp.Solver.CreateSolver("CBC")
     if not solver:
@@ -457,16 +458,19 @@ def solve_lineup(df, scores, slate_type, team_opponents=None):
         sal_ct.SetCoefficient(x[i], int(df.loc[i, "salary"]))
 
     if slate_type == "Showdown":
-        # Exactly 1 Captain and 5 Flex (6 total)
+        # Total: Exactly 6 players
         tot_ct = solver.Constraint(6, 6)
+        # Exactly 1 CPT
         cpt_ct = solver.Constraint(1, 1)
+        # Exactly 5 FLEX
         flex_ct = solver.Constraint(5, 5)
 
-        for i, slot in enumerate(df["roster_slot"]):
+        for i in range(n):
             tot_ct.SetCoefficient(x[i], 1)
+            slot = df.loc[i, "roster_slot"]
             if slot == "CPT":
                 cpt_ct.SetCoefficient(x[i], 1)
-            else:
+            elif slot == "FLEX":
                 flex_ct.SetCoefficient(x[i], 1)
 
         # Mutual Exclusion: Same player cannot be drafted as both CPT and FLEX
@@ -476,7 +480,7 @@ def solve_lineup(df, scores, slate_type, team_opponents=None):
                 for idx in indices:
                     p_ct.SetCoefficient(x[idx], 1)
 
-        # Never draft 2 QBs from the SAME team in Showdown
+        # Never draft 2 QBs from the SAME team
         for tm in df["team"].unique():
             if not tm: continue
             tm_qb_indices = df[(df["team"] == tm) & (df["position"] == "QB")].index.tolist()
@@ -485,7 +489,7 @@ def solve_lineup(df, scores, slate_type, team_opponents=None):
                 for idx in tm_qb_indices:
                     qb_tm_ct.SetCoefficient(x[idx], 1)
 
-        # Team representation: Both teams must have at least 1 player (Max 5 per team)
+        # Team diversity: At least 1 player from each team
         teams = [t for t in df["team"].unique() if t]
         if len(teams) >= 2:
             for tm in teams:
@@ -494,7 +498,6 @@ def solve_lineup(df, scores, slate_type, team_opponents=None):
                     if df.loc[i, "team"] == tm:
                         tm_ct.SetCoefficient(x[i], 1)
     else:
-        # Classic 9-Player DK Roster
         tot_ct = solver.Constraint(9, 9)
         qb_ct = solver.Constraint(1, 1)
         dst_ct = solver.Constraint(1, 1)
@@ -539,7 +542,8 @@ def solve_lineup(df, scores, slate_type, team_opponents=None):
                         anti.SetCoefficient(x[qb_idx], 1)
                         anti.SetCoefficient(x[d_idx], 1)
 
-    if solver.Solve() in [pywraplp.Solver.OPTIMAL, pywraplp.Solver.FEASIBLE]:
+    status = solver.Solve()
+    if status in [pywraplp.Solver.OPTIMAL, pywraplp.Solver.FEASIBLE]:
         selected = [i for i in range(n) if x[i].solution_value() > 0.5]
         lineup = df.loc[selected].copy()
         if slate_type == "Showdown":
@@ -588,8 +592,6 @@ def background_task(target_mode, sender, pw, rec, num_sims=6700):
 
         set_status(True, f"Solving optimal {slate_type} roster...", progress=88, slate_name=slate_title, slate_type=slate_type)
         optimal_roster = solve_lineup(sim_results, sim_results["proj_fpts"].to_numpy(), slate_type, team_opponents)
-        if optimal_roster is None or optimal_roster.empty:
-            optimal_roster = solve_lineup(sim_results, sim_results["proj_fpts"].to_numpy(), slate_type, None)
 
         if optimal_roster is None or optimal_roster.empty:
             set_status(False, "Failed to resolve lineup within salary cap.", progress=0)
