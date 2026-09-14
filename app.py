@@ -262,7 +262,7 @@ def get_all_optimal_slates(min_fee=0.25):
         if fee >= min_fee and dg:
             slate_type = "Showdown" if is_sd else "Classic"
             # Keep the highest prize pool contest per draft group / slate type
-            if dg not in [s.get("dg") for s in slates_map.values()]:
+            if dg not in [s.get("dg") for s in slates_map.values()()]:
                 slates_map[dg] = {
                     "draft_group_id": dg,
                     "name": name,
@@ -701,7 +701,7 @@ def render_side_by_side_optimizers():
         st.subheader("Classic Slate Optimizer")
         classic_slates = {k: v for k, v in slates_dict.items() if v.get("slate_type") == "Classic"}
         if classic_slates:
-            key_c = list(classic_slates.keys())[0]
+            key_c = list(classic_slates.keys()())[0]
             info_c = classic_slates[key_c]
             st.success(f"Active: {info_c["name"]}")
             st.write(f"Prize Pool: ${info_c["prize_pool"]:,}")
@@ -713,7 +713,7 @@ def render_side_by_side_optimizers():
         st.subheader("Showdown Slate Optimizer")
         showdown_slates = {k: v for k, v in slates_dict.items() if v.get("slate_type") == "Showdown"}
         if showdown_slates:
-            key_s = list(showdown_slates.keys())[0]
+            key_s = list(showdown_slates.keys()())[0]
             info_s = showdown_slates[key_s]
             st.success(f"Active: {info_s["name"]}")
             st.write(f"Prize Pool: ${info_s["prize_pool"]:,}")
