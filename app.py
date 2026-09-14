@@ -352,101 +352,55 @@ def fetch_player_pool(draft_group_id, slate_type):
     return df.reset_index(drop=True), matchups_df, team_opponents
 
 def solve_slate(df, score_column, slate_type, team_opponents=None):
-    solver = pywraplp.Solver.CreateSolver("CBC")
-    if not solver:
-        return None
+    import pulp
+    import pandas as pd
+    
+    df = df.reset_index(drop=True)
     n = len(df)
-    x = [solver.BoolVar(f"x_{i}") for i in range(n)]
+    if n == 0:
+        return []
 
-    obj = solver.Objective()
-    for i in range(n):
-        obj.SetCoefficient(x[i], float(df.loc[i, score_column]))
-    obj.SetMaximization()
+    prob = pulp.LpProblem("DK_Solver", pulp.LpMaximize)
+    
+    # Create binary variables for each row in df
+    x = [pulp.LpVariable(f"x_{i}", cat=pulp.LpBinary) for i in range(n)]
 
-    sal_ct = solver.Constraint(0, 50000)
-    for i in range(n):
-        sal_ct.SetCoefficient(x[i], int(df.loc[i, "salary"]))
+    # Objective function
+    prob += pulp.lpSum([df.loc[i, score_column] * x[i] for i in range(n)])
+
+    # Salary cap constraint ($50,000)
+    prob += pulp.lpSum([df.loc[i, "salary"] * x[i] for i in range(n)]) <= 50000
 
     if slate_type == "Showdown":
-        tot_ct = solver.Constraint(6, 6)
-        cpt_ct = solver.Constraint(1, 1)
-        flex_ct = solver.Constraint(5, 5)
+        # Exactly 6 players total
+        prob += pulp.lpSum([x[i] for i in range(n)]) == 6
 
-        for i, slot in enumerate(df["roster_slot"]):
-            tot_ct.SetCoefficient(x[i], 1)
-            if slot == "CPT":
-                cpt_ct.SetCoefficient(x[i], 1)
-            else:
-                flex_ct.SetCoefficient(x[i], 1)
+        # Identify CPT rows vs FLEX rows
+        cpt_indices = [i for i in range(n) if str(df.loc[i, "roster_slot"]) == "CPT" or str(df.loc[i, "position"]) == "CPT"]
+        flex_indices = [i for i in range(n) if i not in cpt_indices]
 
-        # Mutual exclusion: player can only be chosen once (CPT or FLEX)
-        player_groups = df.groupby("player_id").groups
-        for pid, indices in player_groups.items():
-            if len(indices) > 1:
-                p_ct = solver.Constraint(0, 1)
-                for idx in indices:
-                    p_ct.SetCoefficient(x[idx], 1)
+        # Exactly 1 Captain
+        if cpt_indices:
+            prob += pulp.lpSum([x[i] for i in cpt_indices]) == 1
+        # Exactly 5 Flex
+        if flex_indices:
+            prob += pulp.lpSum([x[i] for i in flex_indices]) == 5
 
-        # Both teams represented (at least 1 player from each team)
-        teams = [t for t in df["team"].unique() if t]
-        if len(teams) >= 2:
-            for tm in teams:
-                tm_ct = solver.Constraint(1, 5)
-                for i in range(n):
-                    if df.loc[i, "team"] == tm:
-                        tm_ct.SetCoefficient(x[i], 1)
+        # Mutual exclusion: A player cannot be chosen as both CPT and FLEX
+        # Group by player name or ID to link their CPT and FLEX entries
+        name_col = "name" if "name" in df.columns else df.columns[0]
+        for name, group in df.groupby(name_col):
+            idxs = group.index.tolist()
+            if len(idxs) > 1:
+                prob += pulp.lpSum([x[i] for i in idxs]) <= 1
     else:
-        qb_ct = solver.Constraint(1, 1)
-        dst_ct = solver.Constraint(1, 1)
-        rb_ct = solver.Constraint(2, 3)
-        wr_ct = solver.Constraint(3, 4)
-        te_ct = solver.Constraint(1, 2)
-        flex_ct = solver.Constraint(7, 7)
-        tot_ct = solver.Constraint(9, 9)
+        # Classic / standard slate constraints
+        prob += pulp.lpSum([x[i] for i in range(n)]) == 9
 
-        for i, pos in enumerate(df["position"]):
-            tot_ct.SetCoefficient(x[i], 1)
-            if pos == "QB": qb_ct.SetCoefficient(x[i], 1)
-            elif pos == "DST": dst_ct.SetCoefficient(x[i], 1)
-            elif pos == "RB": rb_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
-            elif pos == "WR": wr_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
-            elif pos == "TE": te_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
+    prob.solve(pulp.PULP_CBC_CMD(msg=0))
 
-        qbs = df[df["position"] == "QB"]
-        for _, qb_row in qbs.iterrows():
-            qb_idx = qb_row.name
-            team = qb_row["team"]
-            stack_partners = df[(df["team"] == team) & (df["position"].isin(["WR", "TE"]))].index.tolist()
-            if stack_partners:
-                stack_ct = solver.Constraint(0, solver.infinity())
-                stack_ct.SetCoefficient(x[qb_idx], -1)
-                for partner_idx in stack_partners:
-                    stack_ct.SetCoefficient(x[partner_idx], 1)
-
-        if team_opponents:
-            for _, qb_row in qbs.iterrows():
-                qb_idx = qb_row.name
-                opp_team = team_opponents.get(qb_row["team"])
-                if opp_team:
-                    opp_dsts = df[(df["team"] == opp_team) & (df["position"] == "DST")].index.tolist()
-                    for dst_idx in opp_dsts:
-                        anti_ct = solver.Constraint(0, 1)
-                        anti_ct.SetCoefficient(x[qb_idx], 1)
-                        anti_ct.SetCoefficient(x[dst_idx], 1)
-
-    status = solver.Solve()
-    if status in [pywraplp.Solver.OPTIMAL, pywraplp.Solver.FEASIBLE]:
-        selected = [i for i in range(n) if x[i].solution_value() > 0.5]
-        lineup = df.loc[selected].copy()
-        if slate_type == "Showdown":
-            lineup["slot"] = lineup["roster_slot"]
-            lineup["order"] = lineup["roster_slot"].map(lambda p: 0 if p == "CPT" else 1)
-        else:
-            pos_order = {"QB": 1, "RB": 2, "WR": 3, "TE": 4, "DST": 5}
-            lineup["slot"] = lineup["position"]
-            lineup["order"] = lineup["position"].map(lambda p: pos_order.get(p, 9))
-        return lineup.sort_values(by="order").drop(columns=["order"])
-    return None
+    selected_indices = [i for i in range(n) if pulp.value(x[i]) > 0.5]
+    return selected_indices
 
 def run_simulation_pure(df, slate_type, team_opponents, num_simulations=6700):
     n = len(df)
