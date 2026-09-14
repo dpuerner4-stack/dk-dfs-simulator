@@ -348,18 +348,14 @@ def fetch_player_pool(draft_group_id, slate_type):
     df["std_dev"] = df.apply(calc_std, axis=1)
     return df.reset_index(drop=True), matchups_df, team_opponents
 
-def solve_slate(df, score_column, slate_type, team_opponents=None):
+def build_model_template(df, slate_type, team_opponents=None):
     solver = pywraplp.Solver.CreateSolver("CBC")
     if not solver:
-        return None
+        return None, None, None
     n = len(df)
     x = [solver.BoolVar(f"x_{i}") for i in range(n)]
 
-    obj = solver.Objective()
-    for i in range(n):
-        obj.SetCoefficient(x[i], float(df.loc[i, score_column]))
-    obj.SetMaximization()
-
+    # Budget
     sal_ct = solver.Constraint(0, 50000)
     for i in range(n):
         sal_ct.SetCoefficient(x[i], int(df.loc[i, "salary"]))
@@ -429,6 +425,19 @@ def solve_slate(df, score_column, slate_type, team_opponents=None):
                         anti_ct.SetCoefficient(x[qb_idx], 1)
                         anti_ct.SetCoefficient(x[dst_idx], 1)
 
+    obj = solver.Objective()
+    obj.SetMaximization()
+    return solver, x, obj
+
+def solve_slate(df, score_column, slate_type, team_opponents=None):
+    solver, x, obj = build_model_template(df, slate_type, team_opponents)
+    if not solver:
+        return None
+    n = len(df)
+    scores = df[score_column].to_numpy()
+    for i in range(n):
+        obj.SetCoefficient(x[i], float(scores[i]))
+
     status = solver.Solve()
     if status in [pywraplp.Solver.OPTIMAL, pywraplp.Solver.FEASIBLE]:
         selected = [i for i in range(n) if x[i].solution_value() > 0.5]
@@ -449,19 +458,25 @@ def run_simulation_pure(df, slate_type, team_opponents, num_simulations=6700):
     sim_matrix = np.clip(sim_matrix, 0, None).astype(np.float32)
 
     counts = np.zeros(n, dtype=np.int32)
-    batch_size = 500
+    solver, x, obj = build_model_template(df, slate_type, team_opponents)
 
-    for b_start in range(0, num_simulations, batch_size):
-        b_end = min(b_start + batch_size, num_simulations)
-        for s in range(b_start, b_end):
-            df["sim_score"] = sim_matrix[s]
-            res = solve_slate(df, "sim_score", slate_type, team_opponents)
-            if res is not None and isinstance(res, pd.DataFrame):
-                for idx in res.index:
-                    counts[idx] += 1
+    # Fallback to loose constraints if tight template was unfeasible
+    if not solver:
+        solver, x, obj = build_model_template(df, slate_type, None)
 
-        pct = 15 + int((b_end / num_simulations) * 70)
-        set_status(True, f"Simulating {b_end:,} / {num_simulations:,} slates...", progress=pct, slate_type=slate_type)
+    for s in range(num_simulations):
+        scores = sim_matrix[s]
+        for i in range(n):
+            obj.SetCoefficient(x[i], float(scores[i]))
+
+        if solver.Solve() in [pywraplp.Solver.OPTIMAL, pywraplp.Solver.FEASIBLE]:
+            for i in range(n):
+                if x[i].solution_value() > 0.5:
+                    counts[i] += 1
+
+        if s % 500 == 0 or s == num_simulations - 1:
+            pct = 15 + int(((s + 1) / num_simulations) * 70)
+            set_status(True, f"Simulating {(s + 1):,} / {num_simulations:,} slates...", progress=pct, slate_type=slate_type)
 
     df["optimal_%"] = np.round((counts / num_simulations) * 100, 2)
     df["leverage"] = np.round(df["optimal_%"] / (df["salary"] / 1000), 2)
