@@ -80,7 +80,7 @@ def generate_email_html(optimal_roster, sim_results, matchups_df, slate_title, s
     lineup_rows = ""
     for idx, row in optimal_roster.iterrows():
         bg = "#ffffff" if idx % 2 == 0 else "#f8f9fa"
-        pos = str(row.get("slot", row.get("position", "")))
+        pos = str(row.get("slot", row.get("roster_slot", row.get("position", ""))))
         badge_color = pos_colors.get(pos, "#adb5bd")
         text_color = "#000000" if pos in ["WR", "RB", "TE", "CPT", "FLEX"] else "#ffffff"
         
@@ -101,7 +101,7 @@ def generate_email_html(optimal_roster, sim_results, matchups_df, slate_title, s
     exposure_rows = ""
     for idx, row in top_exposures.reset_index().iterrows():
         bg = "#ffffff" if idx % 2 == 0 else "#f8f9fa"
-        pos = str(row.get("position", ""))
+        pos = str(row.get("roster_slot", row.get("position", "")))
         badge_color = pos_colors.get(pos, "#adb5bd")
         text_color = "#000000" if pos in ["WR", "RB", "TE", "CPT", "FLEX"] else "#ffffff"
 
@@ -292,10 +292,11 @@ def fetch_player_pool(draft_group_id, slate_type):
             continue
 
         raw_pos = p.get("position") or "UTIL"
+        roster_slot = p.get("rosterSlotId") # 65 = CPT in DK API
         name = p.get("displayName") or f"{p.get('firstName', '')} {p.get('lastName', '')}".strip()
         team = p.get("teamAbbreviation", "")
         matchup = p.get("competition", {}).get("name", "")
-        p_id = p.get("playerId", name)
+        p_id = str(p.get("playerId", name))
 
         fppg = 0.0
         for stat in p.get("draftStatAttributes", []):
@@ -308,10 +309,14 @@ def fetch_player_pool(draft_group_id, slate_type):
         if fppg <= 0.0:
             fppg = round(salary / 450.0, 2)
 
+        # In DK Showdown feeds, raw rosterSlotId 65 or position 'CPT' indicates Captain
+        is_cpt = (roster_slot == 65) or (raw_pos == "CPT") or (salary > 10000 and "CPT" in str(p.get("rosterSlots", [])))
+
         players.append({
             "player_id": p_id,
             "name": name,
             "position": raw_pos,
+            "roster_slot": "CPT" if (slate_type == "Showdown" and is_cpt) else raw_pos,
             "team": team,
             "matchup": matchup,
             "salary": salary,
@@ -322,12 +327,25 @@ def fetch_player_pool(draft_group_id, slate_type):
     if not players:
         raise ValueError("DraftKings player pool is currently empty for this draft group.")
 
-    df = pd.DataFrame(players).drop_duplicates(subset=["player_id", "position"])
+    df = pd.DataFrame(players).drop_duplicates(subset=["player_id", "roster_slot"])
+
+    # If Showdown slate but DK only provided base entries, duplicate entries as CPT with 1.5x multiplier
+    if slate_type == "Showdown" and not any(df["roster_slot"] == "CPT"):
+        cpt_df = df.copy()
+        cpt_df["roster_slot"] = "CPT"
+        cpt_df["salary"] = (cpt_df["salary"] * 1.5).round().astype(int)
+        cpt_df["fppg"] = (cpt_df["fppg"] * 1.5).round(2)
+        df = pd.concat([df, cpt_df], ignore_index=True)
+
     df["proj_fpts"] = pd.to_numeric(df["fppg"], errors="coerce").fillna(df["salary"] / 450.0)
+
+    # Captain slot bonus calculation
+    if slate_type == "Showdown":
+        df.loc[df["roster_slot"] == "CPT", "proj_fpts"] = df.loc[df["roster_slot"] == "CPT", "proj_fpts"] * 1.5
 
     multipliers = {"QB": (0.35, 3.0), "RB": (0.40, 2.5), "WR": (0.55, 2.0), "TE": (0.45, 1.5), "DST": (0.65, 2.0), "CPT": (0.50, 3.0), "FLEX": (0.45, 2.0)}
     def calc_std(r):
-        slope, intercept = multipliers.get(r["position"], (0.45, 2.0))
+        slope, intercept = multipliers.get(r["roster_slot"], (0.45, 2.0))
         return round(float(r["proj_fpts"]) * slope + intercept, 2)
 
     df["std_dev"] = df.apply(calc_std, axis=1)
@@ -354,13 +372,14 @@ def solve_slate(df, score_column, slate_type, team_opponents=None):
         cpt_ct = solver.Constraint(1, 1)
         flex_ct = solver.Constraint(5, 5)
 
-        for i, pos in enumerate(df["position"]):
+        for i, slot in enumerate(df["roster_slot"]):
             tot_ct.SetCoefficient(x[i], 1)
-            if pos == "CPT":
+            if slot == "CPT":
                 cpt_ct.SetCoefficient(x[i], 1)
             else:
                 flex_ct.SetCoefficient(x[i], 1)
 
+        # Mutual exclusion: player can only be chosen once (CPT or FLEX)
         player_groups = df.groupby("player_id").groups
         for pid, indices in player_groups.items():
             if len(indices) > 1:
@@ -368,6 +387,7 @@ def solve_slate(df, score_column, slate_type, team_opponents=None):
                 for idx in indices:
                     p_ct.SetCoefficient(x[idx], 1)
 
+        # Both teams represented (at least 1 player from each team)
         teams = [t for t in df["team"].unique() if t]
         if len(teams) >= 2:
             for tm in teams:
@@ -414,12 +434,13 @@ def solve_slate(df, score_column, slate_type, team_opponents=None):
                         anti_ct.SetCoefficient(x[qb_idx], 1)
                         anti_ct.SetCoefficient(x[dst_idx], 1)
 
-    if solver.Solve() == pywraplp.Solver.OPTIMAL:
+    status = solver.Solve()
+    if status in [pywraplp.Solver.OPTIMAL, pywraplp.Solver.FEASIBLE]:
         selected = [i for i in range(n) if x[i].solution_value() > 0.5]
         lineup = df.loc[selected].copy()
         if slate_type == "Showdown":
-            lineup["slot"] = lineup["position"]
-            lineup["order"] = lineup["position"].map(lambda p: 0 if p == "CPT" else 1)
+            lineup["slot"] = lineup["roster_slot"]
+            lineup["order"] = lineup["roster_slot"].map(lambda p: 0 if p == "CPT" else 1)
         else:
             pos_order = {"QB": 1, "RB": 2, "WR": 3, "TE": 4, "DST": 5}
             lineup["slot"] = lineup["position"]
@@ -466,6 +487,11 @@ def background_task(target_mode, sender, pw, rec, num_sims=6700):
 
         set_status(True, f"Solving optimal {slate_type} roster...", progress=88, slate_name=slate_title, slate_type=slate_type)
         optimal_roster = solve_slate(sim_results, "proj_fpts", slate_type, team_opponents)
+        
+        # Fallback if team constraint was too tight for early incomplete feed
+        if optimal_roster is None or optimal_roster.empty:
+            optimal_roster = solve_slate(sim_results, "proj_fpts", slate_type, None)
+
         if optimal_roster is None or optimal_roster.empty:
             set_status(False, "Failed to resolve optimal roster within cap constraints.", progress=0)
             return
