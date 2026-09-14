@@ -46,7 +46,7 @@ def get_status():
         try:
             with open(CACHE_STATUS, "r") as f:
                 return json.load(f)
-        except:
+        except Exception:
             pass
     return {"running": False, "msg": "Idle", "progress": 0, "last_run": "Never"}
 
@@ -63,14 +63,14 @@ def set_status(running, msg, progress=0, last_run=None):
 
 # --- MODERN EMAIL TEMPLATE GENERATOR ---
 def generate_email_html(optimal_roster, sim_results, matchups_df):
-    pos_colors = {"QB": "#e06666", "RB": "#6fa8dc", "WR": "#ffd966", "TE": "#93c47d", "DST": "#8e7cc3"}
+    pos_colors = {"QB": "#e06666", "RB": "#6fa8dc", "WR": "#ffd966", "TE": "#93c47d", "DST": "#8e7cc3", "CPT": "#f6b26b", "FLEX": "#b6d7a8"}
 
     matchup_badges = ""
     if isinstance(matchups_df, pd.DataFrame) and not matchups_df.empty:
         for _, row in matchups_df.iterrows():
             matchup_badges += f"""
             <span style="display: inline-block; background-color: #f1f3f5; border: 1px solid #dee2e6; border-radius: 6px; padding: 6px 12px; margin: 4px; font-weight: 600; font-size: 13px; color: #343a40;">
-                🏈 {row['matchup']} &nbsp;<span style="font-weight: 400; color: #6c757d;">({row['start_time_et']})</span>
+                🏈 {row['matchup']} &nbsp;<span style="font-weight: 400; color: #6c757d;">({row.get('start_time_et', 'TBD')})</span>
             </span>
             """
     else:
@@ -79,9 +79,9 @@ def generate_email_html(optimal_roster, sim_results, matchups_df):
     lineup_rows = ""
     for idx, row in optimal_roster.iterrows():
         bg = "#ffffff" if idx % 2 == 0 else "#f8f9fa"
-        pos = row.get("position", "")
+        pos = str(row.get("position", ""))
         badge_color = pos_colors.get(pos, "#adb5bd")
-        text_color = "#000000" if pos in ["WR", "RB", "TE"] else "#ffffff"
+        text_color = "#000000" if pos in ["WR", "RB", "TE", "CPT", "FLEX"] else "#ffffff"
         
         lineup_rows += f"""
         <tr style="background-color: {bg}; border-bottom: 1px solid #e9ecef; text-align: left; font-size: 13px;">
@@ -90,9 +90,9 @@ def generate_email_html(optimal_roster, sim_results, matchups_df):
             <td style="padding: 10px 12px; color: #495057;">{row.get('team', '')}</td>
             <td style="padding: 10px 12px; color: #6c757d; font-size: 12px;">{row.get('matchup', '')}</td>
             <td style="padding: 10px 12px; font-weight: 600; color: #198754;">${int(row.get('salary', 0)):,}</td>
-            <td style="padding: 10px 12px; font-weight: 600;">{row.get('proj_fpts', 0):.1f}</td>
-            <td style="padding: 10px 12px; color: #0d6efd; font-weight: 600;">{row.get('optimal_%', 0):.2f}%</td>
-            <td style="padding: 10px 12px; font-weight: 600;">{row.get('leverage', 0):.2f}x</td>
+            <td style="padding: 10px 12px; font-weight: 600;">{float(row.get('proj_fpts', 0)):.1f}</td>
+            <td style="padding: 10px 12px; color: #0d6efd; font-weight: 600;">{float(row.get('optimal_%', 0)):.2f}%</td>
+            <td style="padding: 10px 12px; font-weight: 600;">{float(row.get('leverage', 0)):.2f}x</td>
         </tr>
         """
 
@@ -100,9 +100,9 @@ def generate_email_html(optimal_roster, sim_results, matchups_df):
     exposure_rows = ""
     for idx, row in top_exposures.reset_index().iterrows():
         bg = "#ffffff" if idx % 2 == 0 else "#f8f9fa"
-        pos = row.get("position", "")
+        pos = str(row.get("position", ""))
         badge_color = pos_colors.get(pos, "#adb5bd")
-        text_color = "#000000" if pos in ["WR", "RB", "TE"] else "#ffffff"
+        text_color = "#000000" if pos in ["WR", "RB", "TE", "CPT", "FLEX"] else "#ffffff"
 
         exposure_rows += f"""
         <tr style="background-color: {bg}; border-bottom: 1px solid #e9ecef; text-align: left; font-size: 13px;">
@@ -111,15 +111,15 @@ def generate_email_html(optimal_roster, sim_results, matchups_df):
             <td style="padding: 10px 12px; color: #495057;">{row.get('team', '')}</td>
             <td style="padding: 10px 12px; color: #6c757d; font-size: 12px;">{row.get('matchup', '')}</td>
             <td style="padding: 10px 12px; font-weight: 600; color: #198754;">${int(row.get('salary', 0)):,}</td>
-            <td style="padding: 10px 12px;">{row.get('proj_fpts', 0):.1f}</td>
-            <td style="padding: 10px 12px; color: #0d6efd; font-weight: 700;">{row.get('optimal_%', 0):.2f}%</td>
-            <td style="padding: 10px 12px; font-weight: 700; color: #d63384;">{row.get('leverage', 0):.2f}x</td>
+            <td style="padding: 10px 12px;">{float(row.get('proj_fpts', 0)):.1f}</td>
+            <td style="padding: 10px 12px; color: #0d6efd; font-weight: 700;">{float(row.get('optimal_%', 0)):.2f}%</td>
+            <td style="padding: 10px 12px; font-weight: 700; color: #d63384;">{float(row.get('leverage', 0)):.2f}x</td>
         </tr>
         """
 
     total_sal = int(optimal_roster['salary'].sum())
     rem_sal = 50000 - total_sal
-    total_proj = optimal_roster['proj_fpts'].sum()
+    total_proj = float(optimal_roster['proj_fpts'].sum())
 
     return f"""
     <!DOCTYPE html>
@@ -168,7 +168,7 @@ def generate_email_html(optimal_roster, sim_results, matchups_df):
                     </div>
                 </div>
 
-                <h3>🏆 Optimal Lineup (Max FPPG Constrained)</h3>
+                <h3>🏆 Optimal Lineup</h3>
                 <table class="table-wrap">
                     <thead>
                         <tr><th>Pos</th><th>Player</th><th>Team</th><th>Matchup</th><th>Salary</th><th>Fpts</th><th>Opt %</th><th>Lev</th></tr>
@@ -207,7 +207,7 @@ def send_email_report(optimal_roster, sim_results, matchups_df, sender_email, se
     except Exception as e:
         return False, f"Failed to send email: {e}"
 
-# --- CORE SIMULATION ---
+# --- CORE DATA RETRIEVAL ---
 def get_target_slate(min_fee=0.25, max_fee=30.0, min_pool=25000):
     url = "https://www.draftkings.com/lobby/getcontests?sport=NFL"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -232,8 +232,8 @@ def get_target_slate(min_fee=0.25, max_fee=30.0, min_pool=25000):
             })
 
     df = pd.DataFrame(contests)
-    if df.empty and min_pool > 5000:
-        return get_target_slate(min_fee, max_fee, min_pool=5000)
+    if df.empty and min_pool > 1000:
+        return get_target_slate(min_fee, max_fee, min_pool=1000)
 
     if not df.empty:
         df = df.sort_values(by=["prize_pool", "multiplier"], ascending=[False, False])
@@ -254,25 +254,30 @@ def fetch_player_pool(draft_group_id):
         games.append({"matchup": name, "start_time_et": start_et})
     matchups_df = pd.DataFrame(games)
 
+    draftables = res.get("draftables", [])
     players = []
-    for p in res.get("draftables", []):
-        if p.get("status", "None") in ["O", "IR", "D", "PUP", "SUS"]:
+    for p in draftables:
+        status = p.get("status", "None")
+        if status in ["O", "IR", "D", "PUP", "SUS"]:
             continue
-        salary = p.get("salary", 0)
+        salary = float(p.get("salary", 0))
         if salary <= 0:
             continue
-        pos = p.get("position")
-        name = p.get("displayName")
+        pos = p.get("position") or "UTIL"
+        name = p.get("displayName") or f"{p.get('firstName', '')} {p.get('lastName', '')}".strip()
         team = p.get("teamAbbreviation", "")
         matchup = p.get("competition", {}).get("name", "")
         
         fppg = 0.0
         for stat in p.get("draftStatAttributes", []):
-            if stat.get("id") == 90:
+            if stat.get("id") == 90 or stat.get("description", "").lower() == "fppg":
                 try:
                     fppg = float(stat.get("value", 0))
-                except:
-                    pass
+                except (ValueError, TypeError):
+                    fppg = 0.0
+
+        if fppg <= 0.0:
+            fppg = round(salary / 450.0, 2)
 
         players.append({
             "name": name,
@@ -281,92 +286,44 @@ def fetch_player_pool(draft_group_id):
             "matchup": matchup,
             "salary": salary,
             "fppg": fppg,
-            "status": p.get("status", "None")
+            "status": status
         })
 
+    if not players:
+        raise ValueError("No active players found for this DraftKings draft group.")
+
     df = pd.DataFrame(players).drop_duplicates(subset=["name", "position"])
-    df["proj_fpts"] = df["fppg"]
+    
+    if "fppg" not in df.columns:
+        df["fppg"] = df["salary"] / 450.0
+    
+    df["proj_fpts"] = pd.to_numeric(df["fppg"], errors="coerce").fillna(df["salary"] / 450.0)
 
     multipliers = {"QB": (0.35, 3.0), "RB": (0.40, 2.5), "WR": (0.55, 2.0), "TE": (0.45, 1.5), "DST": (0.65, 2.0)}
     def calc_std(r):
         slope, intercept = multipliers.get(r["position"], (0.45, 2.0))
-        return round(r["proj_fpts"] * slope + intercept, 2)
+        return round(float(r["proj_fpts"]) * slope + intercept, 2)
 
     df["std_dev"] = df.apply(calc_std, axis=1)
     return df.reset_index(drop=True), matchups_df
 
-def is_showdown(df):
-    if "roster_position" in df.columns and "CPT" in df["roster_position"].values:
-        return True
-    return df["team"].nunique() == 2
-
 def solve_optimal_lineup(df, score_column="proj_fpts"):
-    df = df.reset_index(drop=True)
-    n = len(df)
-    showdown = is_showdown(df)
-
     solver = pywraplp.Solver.CreateSolver("CBC")
     if not solver:
         return None
+    n = len(df)
+    x = [solver.BoolVar(f"x_{i}") for i in range(n)]
 
-    if showdown:
-        cpt = [solver.BoolVar(f"cpt_{i}") for i in range(n)]
-        flex = [solver.BoolVar(f"flex_{i}") for i in range(n)]
+    obj = solver.Objective()
+    for i in range(n):
+        obj.SetCoefficient(x[i], float(df.loc[i, score_column]))
+    obj.SetMaximization()
 
-        obj = solver.Objective()
-        sal_ct = solver.Constraint(0, 50000)
-        cpt_ct = solver.Constraint(1, 1)
-        flex_ct = solver.Constraint(5, 5)
-
-        for i in range(n):
-            fpts = float(df.loc[i, score_column])
-            sal = int(df.loc[i, "salary"])
-            obj.SetCoefficient(cpt[i], 1.5 * fpts)
-            obj.SetCoefficient(flex[i], fpts)
-            sal_ct.SetCoefficient(cpt[i], int(sal * 1.5))
-            sal_ct.SetCoefficient(flex[i], sal)
-            cpt_ct.SetCoefficient(cpt[i], 1)
-            flex_ct.SetCoefficient(flex[i], 1)
-            mut_ex = solver.Constraint(0, 1)
-            mut_ex.SetCoefficient(cpt[i], 1)
-            mut_ex.SetCoefficient(flex[i], 1)
-
-        teams = df["team"].unique()
-        if len(teams) == 2:
-            for t in teams:
-                t_ct = solver.Constraint(1, 6)
-                for i in range(n):
-                    if df.loc[i, "team"] == t:
-                        t_ct.SetCoefficient(cpt[i], 1)
-                        t_ct.SetCoefficient(flex[i], 1)
-
-        obj.SetMaximization()
-        if solver.Solve() == pywraplp.Solver.OPTIMAL:
-            rows = []
-            for i in range(n):
-                if cpt[i].solution_value() > 0.5:
-                    r = df.loc[i].to_dict()
-                    r["position"] = "CPT"
-                    r["salary"] = int(r["salary"] * 1.5)
-                    r["proj_fpts"] = round(r["proj_fpts"] * 1.5, 2)
-                    r["order"] = 0
-                    rows.append(r)
-                elif flex[i].solution_value() > 0.5:
-                    r = df.loc[i].to_dict()
-                    r["position"] = "FLEX"
-                    r["order"] = 1
-                    rows.append(r)
-            res = pd.DataFrame(rows)
-            return res.sort_values("order").drop(columns=["order"])
-
-    else:
-        x = [solver.BoolVar(f"x_{i}") for i in range(n)]
-        obj = solver.Objective()
-        for i in range(n):
-            obj.SetCoefficient(x[i], float(df.loc[i, score_column]))
-        obj.SetMaximization()
-
-        sal_ct = solver.Constraint(0, 50000)
+    sal_ct = solver.Constraint(0, 50000)
+    
+    has_classic = any(p in df["position"].values for p in ["QB", "RB", "WR", "TE"])
+    
+    if has_classic:
         qb_ct, dst_ct = solver.Constraint(1, 1), solver.Constraint(1, 1)
         rb_ct, wr_ct, te_ct = solver.Constraint(2, 3), solver.Constraint(3, 4), solver.Constraint(1, 2)
         flex_ct, tot_ct = solver.Constraint(7, 7), solver.Constraint(9, 9)
@@ -379,30 +336,31 @@ def solve_optimal_lineup(df, score_column="proj_fpts"):
             elif pos == "RB": rb_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
             elif pos == "WR": wr_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
             elif pos == "TE": te_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
+    else:
+        tot_ct = solver.Constraint(6, 6)
+        for i in range(n):
+            sal_ct.SetCoefficient(x[i], int(df.loc[i, "salary"]))
+            tot_ct.SetCoefficient(x[i], 1)
 
-        if solver.Solve() == pywraplp.Solver.OPTIMAL:
-            selected = [i for i in range(n) if x[i].solution_value() > 0.5]
-            lineup = df.loc[selected].copy()
-            pos_order = {"QB": 1, "RB": 2, "WR": 3, "TE": 4, "DST": 5}
-            lineup["order"] = lineup["position"].map(pos_order)
-            return lineup.sort_values(by="order").drop(columns=["order"])
-
+    if solver.Solve() == pywraplp.Solver.OPTIMAL:
+        selected = [i for i in range(n) if x[i].solution_value() > 0.5]
+        lineup = df.loc[selected].copy()
+        pos_order = {"QB": 1, "RB": 2, "WR": 3, "TE": 4, "DST": 5, "CPT": 0, "FLEX": 6}
+        lineup["order"] = lineup["position"].map(lambda p: pos_order.get(p, 9))
+        return lineup.sort_values(by="order").drop(columns=["order"])
     return None
 
 def run_simulation_pure(df, num_simulations=17500):
-    df = df.reset_index(drop=True)
     n = len(df)
-    showdown = is_showdown(df)
     salaries = df["salary"].to_numpy(dtype=np.int32)
     positions = df["position"].to_numpy()
-    teams = df["team"].to_numpy()
-
+    has_classic = any(p in positions for p in ["QB", "RB", "WR", "TE"])
+    
     sim_matrix = np.random.normal(df["proj_fpts"], df["std_dev"], size=(num_simulations, n))
     sim_matrix = np.clip(sim_matrix, 0, None).astype(np.float32)
 
     counts = np.zeros(n, dtype=np.int32)
     batch_size = 1000
-
     for b_start in range(0, num_simulations, batch_size):
         b_end = min(b_start + batch_size, num_simulations)
         for s in range(b_start, b_end):
@@ -410,46 +368,14 @@ def run_simulation_pure(df, num_simulations=17500):
             solver = pywraplp.Solver.CreateSolver("CBC")
             if not solver:
                 continue
+            x = [solver.BoolVar(f"x_{i}") for i in range(n)]
+            obj = solver.Objective()
+            for i in range(n):
+                obj.SetCoefficient(x[i], float(scores[i]))
+            obj.SetMaximization()
 
-            if showdown:
-                cpt = [solver.BoolVar(f"c_{i}") for i in range(n)]
-                flx = [solver.BoolVar(f"f_{i}") for i in range(n)]
-                obj = solver.Objective()
-                sal_ct = solver.Constraint(0, 50000)
-                cpt_ct = solver.Constraint(1, 1)
-                flx_ct = solver.Constraint(5, 5)
-
-                for i in range(n):
-                    obj.SetCoefficient(cpt[i], 1.5 * float(scores[i]))
-                    obj.SetCoefficient(flx[i], float(scores[i]))
-                    sal_ct.SetCoefficient(cpt[i], int(salaries[i] * 1.5))
-                    sal_ct.SetCoefficient(flx[i], int(salaries[i]))
-                    cpt_ct.SetCoefficient(cpt[i], 1)
-                    flx_ct.SetCoefficient(flx[i], 1)
-                    m_ex = solver.Constraint(0, 1)
-                    m_ex.SetCoefficient(cpt[i], 1)
-                    m_ex.SetCoefficient(flx[i], 1)
-
-                for t in np.unique(teams):
-                    t_ct = solver.Constraint(1, 6)
-                    for i in range(n):
-                        if teams[i] == t:
-                            t_ct.SetCoefficient(cpt[i], 1)
-                            t_ct.SetCoefficient(flx[i], 1)
-
-                obj.SetMaximization()
-                if solver.Solve() == pywraplp.Solver.OPTIMAL:
-                    for i in range(n):
-                        if cpt[i].solution_value() > 0.5 or flx[i].solution_value() > 0.5:
-                            counts[i] += 1
-            else:
-                x = [solver.BoolVar(f"x_{i}") for i in range(n)]
-                obj = solver.Objective()
-                for i in range(n):
-                    obj.SetCoefficient(x[i], float(scores[i]))
-                obj.SetMaximization()
-
-                sal_ct = solver.Constraint(0, 50000)
+            sal_ct = solver.Constraint(0, 50000)
+            if has_classic:
                 qb_ct, dst_ct = solver.Constraint(1, 1), solver.Constraint(1, 1)
                 rb_ct, wr_ct, te_ct = solver.Constraint(2, 3), solver.Constraint(3, 4), solver.Constraint(1, 2)
                 flex_ct, tot_ct = solver.Constraint(7, 7), solver.Constraint(9, 9)
@@ -462,11 +388,16 @@ def run_simulation_pure(df, num_simulations=17500):
                     elif pos == "RB": rb_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
                     elif pos == "WR": wr_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
                     elif pos == "TE": te_ct.SetCoefficient(x[i], 1); flex_ct.SetCoefficient(x[i], 1)
+            else:
+                tot_ct = solver.Constraint(6, 6)
+                for i in range(n):
+                    sal_ct.SetCoefficient(x[i], int(salaries[i]))
+                    tot_ct.SetCoefficient(x[i], 1)
 
-                if solver.Solve() == pywraplp.Solver.OPTIMAL:
-                    for i in range(n):
-                        if x[i].solution_value() > 0.5:
-                            counts[i] += 1
+            if solver.Solve() == pywraplp.Solver.OPTIMAL:
+                for i in range(n):
+                    if x[i].solution_value() > 0.5:
+                        counts[i] += 1
 
         pct = 15 + int((b_end / num_simulations) * 70)
         set_status(True, f"Simulating {b_end:,} / {num_simulations:,} slates...", progress=pct)
@@ -474,6 +405,7 @@ def run_simulation_pure(df, num_simulations=17500):
     df["optimal_%"] = np.round((counts / num_simulations) * 100, 2)
     df["leverage"] = np.round(df["optimal_%"] / (df["salary"] / 1000), 2)
     return df.sort_values(by="optimal_%", ascending=False)
+
 # --- DETACHED WORKER ---
 def background_task(sender, pw, rec):
     try:
@@ -490,6 +422,9 @@ def background_task(sender, pw, rec):
 
         set_status(True, "Solving optimal salary-constrained roster...", progress=88)
         optimal_roster = solve_optimal_lineup(sim_results, "proj_fpts")
+        if optimal_roster is None or optimal_roster.empty:
+            set_status(False, "Failed to resolve optimal roster within cap constraints.", progress=0)
+            return
 
         optimal_roster.to_csv(CACHE_ROSTER, index=False)
         sim_results.to_csv(CACHE_SIM, index=False)
@@ -551,7 +486,7 @@ if os.path.exists(CACHE_ROSTER) and os.path.exists(CACHE_SIM):
         st.header("Weekly Optimal Lineup")
         c1, c2, c3 = st.columns(3)
         c1.metric("Total Salary", f"${int(roster_df['salary'].sum()):,} / $50,000")
-        c2.metric("Projected Points", f"{roster_df['proj_fpts'].sum():.2f}")
+        c2.metric("Projected Points", f"{float(roster_df['proj_fpts'].sum()):.2f}")
         c3.metric("Last Completed Run", status.get("last_run", "N/A"))
         valid_cols = [c for c in cols_to_display if c in roster_df.columns]
         st.dataframe(roster_df[valid_cols], width="stretch")
@@ -569,7 +504,7 @@ if os.path.exists(CACHE_ROSTER) and os.path.exists(CACHE_SIM):
         with col1:
             min_opt = st.slider("Minimum Optimal %", 0.0, 40.0, 2.0, step=0.5)
         with col2:
-            pos_filter = st.multiselect("Filter Positions", ["QB", "RB", "WR", "TE", "DST"], default=["QB", "RB", "WR", "TE", "DST"])
+            pos_filter = st.multiselect("Filter Positions", ["QB", "RB", "WR", "TE", "DST", "CPT", "FLEX"], default=[p for p in ["QB", "RB", "WR", "TE", "DST"] if p in sim_df["position"].values] or sim_df["position"].unique().tolist())
         valid_cols = [c for c in cols_to_display if c in sim_df.columns]
         filtered = sim_df[(sim_df["optimal_%"] >= min_opt) & (sim_df["position"].isin(pos_filter))]
         st.dataframe(filtered[valid_cols], width="stretch")
