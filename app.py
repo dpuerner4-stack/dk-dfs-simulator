@@ -496,7 +496,7 @@ def run_simulation_pure(df, slate_type, team_opponents, num_simulations=6700):
             df["sim_score"] = sim_matrix[s]
             res = solve_slate(df, "sim_score", slate_type, team_opponents)
             if res is not None:
-                for idx in res.index:
+                for idx in res:
                     counts[idx] += 1
 
         pct = 15 + int((b_end / num_simulations) * 70)
