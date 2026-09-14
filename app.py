@@ -1,3 +1,33 @@
+
+def get_all_active_slates(min_fee=0.25):
+    import requests
+    import pandas as pd
+    url = "https://www.draftkings.com/lobby/getcontests?sport=NFL"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        res = requests.get(url, headers=headers, timeout=10).json()
+    except Exception:
+        return {}
+
+    slates = {}
+    for c in res.get("Contests", []):
+        fee = float(c.get("a", 0))
+        dg = c.get("dg")
+        name = c.get("n", "")
+        game_type = c.get("gameType", "")
+        is_sd = "showdown" in name.lower() or "single game" in name.lower() or game_type in ["Showdown", "SingleGame"]
+        
+        if fee >= min_fee and dg:
+            stype = "Showdown" if is_sd else "Classic"
+            if dg not in slates:
+                slates[dg] = {
+                    "draft_group_id": dg,
+                    "name": name,
+                    "slate_type": stype,
+                    "prize_pool": float(c.get("po", 0))
+                }
+    return slates
+
 import streamlit as st
 import pandas as pd
 import numpy as np
