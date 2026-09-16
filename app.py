@@ -19,6 +19,21 @@ st.set_page_config(page_title="DraftKings Optimizer", layout="wide")
 ET_TZ = ZoneInfo("America/New_York")
 DEFAULT_SIMULATIONS = 6700
 
+SESSION = requests.Session()
+SESSION.headers.update({
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Sec-Ch-Ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"macOS"',
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-site",
+    "Origin": "https://www.draftkings.com",
+    "Referer": "https://www.draftkings.com/"
+})
+
 def get_current_et_str(fmt="%A, %b %d, %Y at %I:%M %p ET"):
     return datetime.now(ET_TZ).strftime(fmt)
 
@@ -82,7 +97,6 @@ def generate_email_html(optimal_roster, sim_results, matchups_df, slate_title, s
         slot = str(row.get("roster_slot", row.get("position", "")))
         badge_color = pos_colors.get(slot, "#adb5bd")
         text_color = "#000000" if slot in ["WR", "RB", "TE", "CPT", "FLEX"] else "#ffffff"
-        
         crown = "👑 " if slot == "CPT" else ""
         
         lineup_rows += f"""
@@ -212,14 +226,24 @@ def send_email_report(optimal_roster, sim_results, matchups_df, slate_title, sla
     except Exception as e:
         return False, str(e)
 
+# --- ROBUST REQUEST RETRY WRAPPER ---
+def fetch_dk_endpoint(url, retries=3, delay=1.5):
+    for attempt in range(retries):
+        try:
+            resp = SESSION.get(url, timeout=12)
+            if resp.status_code == 200 and resp.text and len(resp.text.strip()) > 10:
+                return resp.json()
+            time.sleep(delay * (attempt + 1))
+        except Exception:
+            time.sleep(delay)
+    return None
+
 # --- CONTEST SCANNER ---
 def get_target_slate(target_mode="Auto-Detect Next Slate"):
     url = "https://www.draftkings.com/lobby/getcontests?sport=NFL"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        res = requests.get(url, headers=headers, timeout=10).json()
-    except Exception:
-        return None, "Classic", "No Slates Available"
+    res = fetch_dk_endpoint(url)
+    if not res:
+        return None, "Classic", "DraftKings Lobby Unavailable"
 
     now_et = datetime.now(ET_TZ)
     weekday = now_et.weekday()
@@ -249,12 +273,12 @@ def get_target_slate(target_mode="Auto-Detect Next Slate"):
     df = pd.DataFrame(contests)
 
     if target_mode == "Auto-Detect Next Slate":
-        if weekday == 0:
-            matched = df[df["is_showdown"] & (df["name"].str.contains("MNF", case=False, na=False) | df["name"].str.contains("Monday", case=False, na=False))]
+        if weekday in [1, 2, 3]:  # Tue, Wed, Thu -> Target TNF
+            matched = df[df["is_showdown"] & (df["name"].str.contains("TNF", case=False, na=False) | df["name"].str.contains("Thursday", case=False, na=False))]
             if matched.empty:
                 matched = df[df["is_showdown"]]
-        elif weekday == 3:
-            matched = df[df["is_showdown"] & (df["name"].str.contains("TNF", case=False, na=False) | df["name"].str.contains("Thursday", case=False, na=False))]
+        elif weekday == 0:  # Mon -> MNF
+            matched = df[df["is_showdown"] & (df["name"].str.contains("MNF", case=False, na=False) | df["name"].str.contains("Monday", case=False, na=False))]
             if matched.empty:
                 matched = df[df["is_showdown"]]
         elif weekday == 6 and now_et.hour < 16:
@@ -263,12 +287,12 @@ def get_target_slate(target_mode="Auto-Detect Next Slate"):
                 matched = df[~df["is_showdown"]]
         else:
             matched = df
-    elif target_mode == "Monday Night Football (Showdown)":
-        matched = df[df["is_showdown"] & (df["name"].str.contains("MNF", case=False, na=False) | df["name"].str.contains("Monday", case=False, na=False))]
-        if matched.empty:
-            matched = df[df["is_showdown"]]
     elif target_mode == "Thursday Night Football (Showdown)":
         matched = df[df["is_showdown"] & (df["name"].str.contains("TNF", case=False, na=False) | df["name"].str.contains("Thursday", case=False, na=False))]
+        if matched.empty:
+            matched = df[df["is_showdown"]]
+    elif target_mode == "Monday Night Football (Showdown)":
+        matched = df[df["is_showdown"] & (df["name"].str.contains("MNF", case=False, na=False) | df["name"].str.contains("Monday", case=False, na=False))]
         if matched.empty:
             matched = df[df["is_showdown"]]
     elif target_mode == "Sunday Night Football (Showdown)":
@@ -285,7 +309,6 @@ def get_target_slate(target_mode="Auto-Detect Next Slate"):
     slate_type = "Showdown" if best["is_showdown"] else "Classic"
     return best["draft_group_id"], slate_type, best["name"]
 
-# --- PROJECTION ENGINE & STARTER FILTER ---
 def calculate_true_projection(p, starting_qbs):
     name = p["name"]
     pos = p["position"]
@@ -293,7 +316,6 @@ def calculate_true_projection(p, starting_qbs):
     sal = p["salary"]
     raw_fppg = p["raw_fppg"]
 
-    # Eliminate Backup QBs
     if pos == "QB":
         if team in starting_qbs and name != starting_qbs[team]:
             return 0.0
@@ -302,7 +324,6 @@ def calculate_true_projection(p, starting_qbs):
     if raw_fppg and raw_fppg > 4.0:
         return float(raw_fppg)
 
-    # Active player tier projection
     if sal >= 10000:
         return round(15.0 + (sal - 10000) * 0.0012, 1)
     elif sal >= 7000:
@@ -315,9 +336,17 @@ def calculate_true_projection(p, starting_qbs):
         return 0.2
 
 def fetch_player_pool(draft_group_id, slate_type):
-    url = f"https://api.draftkings.com/draftgroups/v1/draftgroups/{draft_group_id}/draftables?format=json"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    res = requests.get(url, headers=headers, timeout=10).json()
+    # Primary API endpoint
+    url1 = f"https://api.draftkings.com/draftgroups/v1/draftgroups/{draft_group_id}/draftables?format=json"
+    res = fetch_dk_endpoint(url1)
+
+    # Fallback to alternate endpoint if edge router returned empty
+    if not res or "draftables" not in res:
+        url2 = f"https://api.draftkings.com/draftgroups/v1/draftgroups/{draft_group_id}/draftables"
+        res = fetch_dk_endpoint(url2)
+
+    if not res or "draftables" not in res:
+        raise ValueError(f"DraftKings player pool feed currently unavailable for draft group {draft_group_id}. Try again in 30 seconds.")
 
     matchups = []
     team_opponents = {}
@@ -377,7 +406,7 @@ def fetch_player_pool(draft_group_id, slate_type):
 
     base_list = list(player_dict.values())
     if not base_list:
-        raise ValueError("No active players available for this slate.")
+        raise ValueError("No active players returned by DraftKings for this draft group.")
 
     starting_qbs = {}
     for p in base_list:
@@ -394,7 +423,6 @@ def fetch_player_pool(draft_group_id, slate_type):
             if proj <= 0.0:
                 continue
 
-            # 1. FLEX entry (1.0x)
             entries.append({
                 "player_id": p["player_id"],
                 "name": p["name"],
@@ -406,7 +434,6 @@ def fetch_player_pool(draft_group_id, slate_type):
                 "proj_fpts": proj
             })
 
-            # 2. CPT entry (1.5x salary, 1.5x score)
             entries.append({
                 "player_id": p["player_id"],
                 "name": p["name"],
@@ -439,7 +466,7 @@ def fetch_player_pool(draft_group_id, slate_type):
 
     return pool_df.reset_index(drop=True), matchups_df, team_opponents
 
-# --- EXACT MATHEMATICAL SOLVER (STRICT CPT ENFORCEMENT) ---
+# --- SOLVER ---
 def solve_lineup(df, scores, slate_type, team_opponents=None):
     solver = pywraplp.Solver.CreateSolver("CBC")
     if not solver:
@@ -452,17 +479,13 @@ def solve_lineup(df, scores, slate_type, team_opponents=None):
         obj.SetCoefficient(x[i], float(scores[i]))
     obj.SetMaximization()
 
-    # Total Salary <= $50,000
     sal_ct = solver.Constraint(0, 50000)
     for i in range(n):
         sal_ct.SetCoefficient(x[i], int(df.loc[i, "salary"]))
 
     if slate_type == "Showdown":
-        # Total: Exactly 6 players
         tot_ct = solver.Constraint(6, 6)
-        # Exactly 1 CPT
         cpt_ct = solver.Constraint(1, 1)
-        # Exactly 5 FLEX
         flex_ct = solver.Constraint(5, 5)
 
         for i in range(n):
@@ -473,14 +496,12 @@ def solve_lineup(df, scores, slate_type, team_opponents=None):
             elif slot == "FLEX":
                 flex_ct.SetCoefficient(x[i], 1)
 
-        # Mutual Exclusion: Same player cannot be drafted as both CPT and FLEX
         for pid, indices in df.groupby("player_id").groups.items():
             if len(indices) > 1:
                 p_ct = solver.Constraint(0, 1)
                 for idx in indices:
                     p_ct.SetCoefficient(x[idx], 1)
 
-        # Never draft 2 QBs from the SAME team
         for tm in df["team"].unique():
             if not tm: continue
             tm_qb_indices = df[(df["team"] == tm) & (df["position"] == "QB")].index.tolist()
@@ -489,7 +510,6 @@ def solve_lineup(df, scores, slate_type, team_opponents=None):
                 for idx in tm_qb_indices:
                     qb_tm_ct.SetCoefficient(x[idx], 1)
 
-        # Team diversity: At least 1 player from each team
         teams = [t for t in df["team"].unique() if t]
         if len(teams) >= 2:
             for tm in teams:
@@ -629,8 +649,8 @@ with st.sidebar:
         "Target Game Window",
         [
             "Auto-Detect Next Slate",
-            "Monday Night Football (Showdown)",
             "Thursday Night Football (Showdown)",
+            "Monday Night Football (Showdown)",
             "Sunday Main Slate (Classic)",
             "Sunday Night Football (Showdown)"
         ]
