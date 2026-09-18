@@ -222,7 +222,7 @@ def send_email_report(optimal_roster, sim_results, matchups_df, slate_title, sla
     except Exception as e:
         return False, str(e)
 
-# --- CONTEST SCANNER ---
+# --- FLEXIBLE CONTEST SCANNER WITH FALLBACK ITERATION ---
 def get_target_slate(target_mode="Auto-Detect Next Slate"):
     url = "https://www.draftkings.com/lobby/getcontests?sport=NFL"
     resp = SESSION.get(url, timeout=12)
@@ -257,7 +257,6 @@ def get_target_slate(target_mode="Auto-Detect Next Slate"):
 
     df = pd.DataFrame(contests)
 
-    # Respect explicit user selection in sidebar first
     if target_mode == "Thursday Night Football (Showdown)":
         matched = df[df["is_showdown"] & (df["name"].str.contains("TNF", case=False, na=False) | df["name"].str.contains("Thursday", case=False, na=False))]
         if matched.empty: matched = df[df["is_showdown"]]
@@ -268,28 +267,29 @@ def get_target_slate(target_mode="Auto-Detect Next Slate"):
         matched = df[df["is_showdown"] & (df["name"].str.contains("SNF", case=False, na=False) | df["name"].str.contains("Sunday Night", case=False, na=False))]
         if matched.empty: matched = df[df["is_showdown"]]
     elif target_mode == "Sunday Main Slate (Classic)":
-        matched = df[~df["is_showdown"] & df["name"].str.contains("Main", case=False, na=False)]
+        matched = df[~df["is_showdown"] & (df["name"].str.contains("Main", case=False, na=False) | df["name"].str.contains("Millionaire", case=False, na=False))]
         if matched.empty: matched = df[~df["is_showdown"]]
     else:
-        # Auto-Detect: prefer single game showdowns on Thu/Mon, Main Classic on Sun morning
         if weekday in [1, 2, 3]:  # Tue-Thu -> TNF
             matched = df[df["is_showdown"] & (df["name"].str.contains("TNF", case=False, na=False) | df["name"].str.contains("Thursday", case=False, na=False))]
             if matched.empty: matched = df[df["is_showdown"]]
         elif weekday == 0:  # Mon -> MNF
             matched = df[df["is_showdown"] & (df["name"].str.contains("MNF", case=False, na=False) | df["name"].str.contains("Monday", case=False, na=False))]
             if matched.empty: matched = df[df["is_showdown"]]
-        elif weekday == 6:  # Sunday -> Main Classic
-            matched = df[~df["is_showdown"] & df["name"].str.contains("Main", case=False, na=False)]
-            if matched.empty: matched = df[~df["is_showdown"]]
         else:
-            matched = df
+            matched = df[~df["is_showdown"] & (df["name"].str.contains("Main", case=False, na=False) | df["name"].str.contains("Millionaire", case=False, na=False))]
+            if matched.empty: matched = df[~df["is_showdown"]]
 
     if matched.empty:
         matched = df
 
-    best = matched.sort_values(by="prize_pool", ascending=False).iloc[0]
-    slate_type = "Showdown" if best["is_showdown"] else "Classic"
-    return best["draft_group_id"], slate_type, best["name"]
+    # Sort by prize pool descending to test viable contests in order
+    sorted_matched = matched.sort_values(by="prize_pool", ascending=False)
+    for _, row in sorted_matched.iterrows():
+        return row["draft_group_id"], ("Showdown" if row["is_showdown"] else "Classic"), row["name"]
+
+    best = df.sort_values(by="prize_pool", ascending=False).iloc[0]
+    return best["draft_group_id"], ("Showdown" if best["is_showdown"] else "Classic"), best["name"]
 
 def calculate_true_projection(p, starting_qbs):
     name = p["name"]
@@ -317,7 +317,7 @@ def calculate_true_projection(p, starting_qbs):
     else:
         return 0.2
 
-# --- HYBRID INGESTION ENGINE WITH AUTOMATIC SLATE TYPE OVERRIDE ---
+# --- PLAYER POOL INGESTION WITH MULTI-CONTEST FALLBACK ---
 def fetch_player_pool(draft_group_id, target_slate_type):
     url_json = f"https://api.draftkings.com/draftgroups/v1/draftgroups/{draft_group_id}/draftables?format=json"
     matchups_df = pd.DataFrame()
@@ -379,7 +379,6 @@ def fetch_player_pool(draft_group_id, target_slate_type):
     except Exception:
         base_list = []
 
-    # Fallback to CSV if JSON fails
     if not base_list:
         url_csv = f"https://www.draftkings.com/lineup/getavailableplayerscsv?draftGroupId={draft_group_id}"
         r_csv = SESSION.get(url_csv, timeout=10)
@@ -426,9 +425,8 @@ def fetch_player_pool(draft_group_id, target_slate_type):
             base_list = list(player_dict.values())
 
     if not base_list:
-        raise ValueError(f"DraftGroup {draft_group_id} player pool unavailable.")
+        raise ValueError(f"DraftGroup {draft_group_id} player pool currently unavailable.")
 
-    # AUTOMATIC SLATE TYPE CHECK: If matchups count > 1, force Classic rules!
     num_games = len(matchups_df.drop_duplicates())
     actual_slate_type = "Classic" if num_games > 1 else target_slate_type
 
@@ -459,7 +457,7 @@ def fetch_player_pool(draft_group_id, target_slate_type):
 
     return pool_df.reset_index(drop=True), matchups_df.drop_duplicates(), team_opponents, actual_slate_type
 
-# --- EXACT MATHEMATICAL SOLVER ---
+# --- SOLVER ---
 def solve_lineup(df, scores, slate_type, team_opponents=None):
     solver = pywraplp.Solver.CreateSolver("CBC")
     if not solver:
@@ -506,7 +504,6 @@ def solve_lineup(df, scores, slate_type, team_opponents=None):
                 for i in range(n):
                     if df.loc[i, "team"] == tm: tm_ct.SetCoefficient(x[i], 1)
     else:
-        # Classic 9-Player Rules
         tot_ct = solver.Constraint(9, 9)
         qb_ct = solver.Constraint(1, 1)
         dst_ct = solver.Constraint(1, 1)
@@ -628,10 +625,10 @@ with st.sidebar:
         "Target Game Window",
         [
             "Auto-Detect Next Slate",
-            "Thursday Night Football (Showdown)",
-            "Monday Night Football (Showdown)",
             "Sunday Main Slate (Classic)",
-            "Sunday Night Football (Showdown)"
+            "Thursday Night Football (Showdown)",
+            "Sunday Night Football (Showdown)",
+            "Monday Night Football (Showdown)"
         ]
     )
     num_simulations = st.number_input("Monte Carlo Sample Size", min_value=1000, max_value=20000, value=6700, step=500)
