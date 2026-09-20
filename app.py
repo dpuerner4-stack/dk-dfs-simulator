@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import requests
 import io
-import csv
 from ortools.linear_solver import pywraplp
 import time
 from datetime import datetime
@@ -72,7 +71,6 @@ def set_status(running, msg, progress=0, last_run=None, slate_name=None, slate_t
     with open(CACHE_STATUS, "w") as f:
         json.dump(payload, f)
 
-# --- EMAIL DIGEST GENERATOR ---
 def generate_email_html(optimal_roster, sim_results, matchups_df, slate_title, slate_type):
     pos_colors = {"QB": "#e06666", "RB": "#6fa8dc", "WR": "#ffd966", "TE": "#93c47d", "DST": "#8e7cc3", "K": "#b4a7d6", "CPT": "#f6b26b", "FLEX": "#6fa8dc"}
 
@@ -222,25 +220,27 @@ def send_email_report(optimal_roster, sim_results, matchups_df, slate_title, sla
     except Exception as e:
         return False, str(e)
 
-# --- FLEXIBLE CONTEST SCANNER WITH FALLBACK ITERATION ---
-def get_target_slate(target_mode="Auto-Detect Next Slate"):
+def get_candidate_contests(target_mode="Auto-Detect Next Slate"):
     url = "https://www.draftkings.com/lobby/getcontests?sport=NFL"
     resp = SESSION.get(url, timeout=12)
     if resp.status_code != 200 or not resp.text.strip():
-        return None, "Classic", "DraftKings Lobby Unavailable"
+        return []
 
     res = resp.json()
-    now_et = datetime.now(ET_TZ)
-    weekday = now_et.weekday()
-
     contests = []
+
     for c in res.get("Contests", []):
         fee = float(c.get("a", 0))
         pool = float(c.get("po", 0))
         dg = c.get("dg")
         name = c.get("n", "")
+
+        # Block future tournament qualifiers or midseason placeholders that lack player files
+        if "midseason" in name.lower() or "qualifier" in name.lower():
+            continue
+
         game_type = str(c.get("gameType", "")).lower()
-        is_sd = "showdown" in name.lower() or "single game" in name.lower() or "showdown" in game_type or "showdown" in str(c.get("gameStyle", "")).lower()
+        is_sd = "showdown" in name.lower() or "single game" in name.lower() or "showdown" in game_type
 
         if fee >= 0.25 and pool >= 1000 and dg:
             contests.append({
@@ -252,44 +252,30 @@ def get_target_slate(target_mode="Auto-Detect Next Slate"):
                 "is_showdown": is_sd
             })
 
-    if not contests:
-        return None, "Classic", "No Contests Found"
-
     df = pd.DataFrame(contests)
+    if df.empty:
+        return []
 
-    if target_mode == "Thursday Night Football (Showdown)":
+    if target_mode == "Sunday Main Slate (Classic)":
+        matched = df[~df["is_showdown"] & (df["name"].str.contains("Millionaire", case=False, na=False) | df["name"].str.contains("Play-Action", case=False, na=False) | df["name"].str.contains("Main", case=False, na=False))]
+        if matched.empty: matched = df[~df["is_showdown"]]
+    elif target_mode == "Thursday Night Football (Showdown)":
         matched = df[df["is_showdown"] & (df["name"].str.contains("TNF", case=False, na=False) | df["name"].str.contains("Thursday", case=False, na=False))]
-        if matched.empty: matched = df[df["is_showdown"]]
-    elif target_mode == "Monday Night Football (Showdown)":
-        matched = df[df["is_showdown"] & (df["name"].str.contains("MNF", case=False, na=False) | df["name"].str.contains("Monday", case=False, na=False))]
         if matched.empty: matched = df[df["is_showdown"]]
     elif target_mode == "Sunday Night Football (Showdown)":
         matched = df[df["is_showdown"] & (df["name"].str.contains("SNF", case=False, na=False) | df["name"].str.contains("Sunday Night", case=False, na=False))]
         if matched.empty: matched = df[df["is_showdown"]]
-    elif target_mode == "Sunday Main Slate (Classic)":
-        matched = df[~df["is_showdown"] & (df["name"].str.contains("Main", case=False, na=False) | df["name"].str.contains("Millionaire", case=False, na=False))]
-        if matched.empty: matched = df[~df["is_showdown"]]
+    elif target_mode == "Monday Night Football (Showdown)":
+        matched = df[df["is_showdown"] & (df["name"].str.contains("MNF", case=False, na=False) | df["name"].str.contains("Monday", case=False, na=False))]
+        if matched.empty: matched = df[df["is_showdown"]]
     else:
-        if weekday in [1, 2, 3]:  # Tue-Thu -> TNF
-            matched = df[df["is_showdown"] & (df["name"].str.contains("TNF", case=False, na=False) | df["name"].str.contains("Thursday", case=False, na=False))]
-            if matched.empty: matched = df[df["is_showdown"]]
-        elif weekday == 0:  # Mon -> MNF
-            matched = df[df["is_showdown"] & (df["name"].str.contains("MNF", case=False, na=False) | df["name"].str.contains("Monday", case=False, na=False))]
-            if matched.empty: matched = df[df["is_showdown"]]
-        else:
-            matched = df[~df["is_showdown"] & (df["name"].str.contains("Main", case=False, na=False) | df["name"].str.contains("Millionaire", case=False, na=False))]
-            if matched.empty: matched = df[~df["is_showdown"]]
+        matched = df[~df["is_showdown"] & (df["name"].str.contains("Millionaire", case=False, na=False) | df["name"].str.contains("Play-Action", case=False, na=False) | df["name"].str.contains("Main", case=False, na=False))]
+        if matched.empty: matched = df[~df["is_showdown"]]
 
     if matched.empty:
         matched = df
 
-    # Sort by prize pool descending to test viable contests in order
-    sorted_matched = matched.sort_values(by="prize_pool", ascending=False)
-    for _, row in sorted_matched.iterrows():
-        return row["draft_group_id"], ("Showdown" if row["is_showdown"] else "Classic"), row["name"]
-
-    best = df.sort_values(by="prize_pool", ascending=False).iloc[0]
-    return best["draft_group_id"], ("Showdown" if best["is_showdown"] else "Classic"), best["name"]
+    return matched.sort_values(by="prize_pool", ascending=False).to_dict(orient="records")
 
 def calculate_true_projection(p, starting_qbs):
     name = p["name"]
@@ -317,70 +303,14 @@ def calculate_true_projection(p, starting_qbs):
     else:
         return 0.2
 
-# --- PLAYER POOL INGESTION WITH MULTI-CONTEST FALLBACK ---
-def fetch_player_pool(draft_group_id, target_slate_type):
-    url_json = f"https://api.draftkings.com/draftgroups/v1/draftgroups/{draft_group_id}/draftables?format=json"
+def fetch_player_pool_by_dg(draft_group_id, target_slate_type):
     matchups_df = pd.DataFrame()
     team_opponents = {}
     base_list = []
 
+    # Priority 1: Direct CSV feed
+    url_csv = f"https://www.draftkings.com/lineup/getavailableplayerscsv?draftGroupId={draft_group_id}"
     try:
-        r = SESSION.get(url_json, timeout=10)
-        if r.status_code == 200 and r.text.strip():
-            data = r.json()
-            competitions = data.get("competitions", [])
-            for comp in competitions:
-                m_name = comp.get("name", "")
-                start_et = format_utc_to_et(comp.get("startTime", ""))
-                matchups_df = pd.concat([matchups_df, pd.DataFrame([{"matchup": m_name, "start_time_et": start_et}])], ignore_index=True)
-                if "@" in m_name:
-                    away, home = [t.strip() for t in m_name.split("@")]
-                    team_opponents[away] = home
-                    team_opponents[home] = away
-
-            raw_players = data.get("draftables", [])
-            player_dict = {}
-            for p in raw_players:
-                if p.get("status", "None") in ["O", "IR", "D", "PUP", "SUS"]:
-                    continue
-                sal = float(p.get("salary", 0))
-                if sal <= 0:
-                    continue
-
-                name = p.get("displayName") or f"{p.get('firstName', '')} {p.get('lastName', '')}".strip()
-                team = p.get("teamAbbreviation", "")
-                matchup = p.get("competition", {}).get("name", "")
-                pid = str(p.get("playerId", name))
-                pos = p.get("position") or "UTIL"
-                roster_slot_id = p.get("rosterSlotId")
-                is_cpt_record = (roster_slot_id == 65) or (pos == "CPT")
-
-                fppg = 0.0
-                for stat in p.get("draftStatAttributes", []):
-                    if stat.get("id") == 90 or stat.get("description", "").lower() == "fppg":
-                        try: fppg = float(stat.get("value", 0))
-                        except Exception: pass
-
-                base_sal = round(sal / 1.5) if is_cpt_record else sal
-                if pid not in player_dict:
-                    player_dict[pid] = {
-                        "player_id": pid, "name": name,
-                        "position": pos if pos != "CPT" else "UTIL",
-                        "team": team, "matchup": matchup,
-                        "salary": base_sal, "raw_fppg": fppg
-                    }
-                else:
-                    if not is_cpt_record:
-                        player_dict[pid]["salary"] = base_sal
-                    if fppg > player_dict[pid]["raw_fppg"]:
-                        player_dict[pid]["raw_fppg"] = fppg
-
-            base_list = list(player_dict.values())
-    except Exception:
-        base_list = []
-
-    if not base_list:
-        url_csv = f"https://www.draftkings.com/lineup/getavailableplayerscsv?draftGroupId={draft_group_id}"
         r_csv = SESSION.get(url_csv, timeout=10)
         if r_csv.status_code == 200 and "Position" in r_csv.text:
             csv_data = pd.read_csv(io.StringIO(r_csv.text))
@@ -423,9 +353,53 @@ def fetch_player_pool(draft_group_id, target_slate_type):
                         player_dict[pid]["raw_fppg"] = fppg
 
             base_list = list(player_dict.values())
+    except Exception:
+        base_list = []
+
+    # Priority 2: JSON draftables feed
+    if not base_list:
+        url_json = f"https://api.draftkings.com/draftgroups/v1/draftgroups/{draft_group_id}/draftables?format=json"
+        try:
+            r = SESSION.get(url_json, timeout=10)
+            if r.status_code == 200 and r.text.strip():
+                data = r.json()
+                for comp in data.get("competitions", []):
+                    m_name = comp.get("name", "")
+                    start_et = format_utc_to_et(comp.get("startTime", ""))
+                    matchups_df = pd.concat([matchups_df, pd.DataFrame([{"matchup": m_name, "start_time_et": start_et}])], ignore_index=True)
+                    if "@" in m_name:
+                        away, home = [t.strip() for t in m_name.split("@")]
+                        team_opponents[away] = home
+                        team_opponents[home] = away
+
+                player_dict = {}
+                for p in data.get("draftables", []):
+                    if p.get("status", "None") in ["O", "IR", "D", "PUP", "SUS"]: continue
+                    sal = float(p.get("salary", 0))
+                    if sal <= 0: continue
+                    name = p.get("displayName") or f"{p.get('firstName', '')} {p.get('lastName', '')}".strip()
+                    team = p.get("teamAbbreviation", "")
+                    matchup = p.get("competition", {}).get("name", "")
+                    pid = str(p.get("playerId", name))
+                    pos = p.get("position") or "UTIL"
+                    is_cpt = (p.get("rosterSlotId") == 65) or (pos == "CPT")
+                    fppg = 0.0
+                    for stat in p.get("draftStatAttributes", []):
+                        if stat.get("id") == 90 or stat.get("description", "").lower() == "fppg":
+                            try: fppg = float(stat.get("value", 0))
+                            except Exception: pass
+                    base_sal = round(sal / 1.5) if is_cpt else sal
+                    if pid not in player_dict:
+                        player_dict[pid] = {"player_id": pid, "name": name, "position": pos if pos != "CPT" else "UTIL", "team": team, "matchup": matchup, "salary": base_sal, "raw_fppg": fppg}
+                    else:
+                        if not is_cpt: player_dict[pid]["salary"] = base_sal
+                        if fppg > player_dict[pid]["raw_fppg"]: player_dict[pid]["raw_fppg"] = fppg
+                base_list = list(player_dict.values())
+        except Exception:
+            base_list = []
 
     if not base_list:
-        raise ValueError(f"DraftGroup {draft_group_id} player pool currently unavailable.")
+        return None, None, None, None
 
     num_games = len(matchups_df.drop_duplicates())
     actual_slate_type = "Classic" if num_games > 1 else target_slate_type
@@ -457,7 +431,6 @@ def fetch_player_pool(draft_group_id, target_slate_type):
 
     return pool_df.reset_index(drop=True), matchups_df.drop_duplicates(), team_opponents, actual_slate_type
 
-# --- SOLVER ---
 def solve_lineup(df, scores, slate_type, team_opponents=None):
     solver = pywraplp.Solver.CreateSolver("CBC")
     if not solver:
@@ -576,13 +549,31 @@ def run_monte_carlo(df, slate_type, team_opponents, num_sims=6700):
 def background_task(target_mode, sender, pw, rec, num_sims=6700):
     try:
         set_status(True, f"Scanning for {target_mode}...", progress=5)
-        draft_group_id, target_slate_type, slate_title = get_target_slate(target_mode)
-        if not draft_group_id:
+        candidates = get_candidate_contests(target_mode)
+        if not candidates:
             set_status(False, f"No active contests found for {target_mode}.", progress=0)
             return
 
-        set_status(True, f"Downloading pool for {slate_title}...", progress=15, slate_name=slate_title, slate_type=target_slate_type)
-        players_df, matchups_df, team_opponents, actual_slate_type = fetch_player_pool(draft_group_id, target_slate_type)
+        players_df, matchups_df, team_opponents, actual_slate_type = None, None, None, None
+        chosen_contest = None
+
+        for c in candidates:
+            dg = c["draft_group_id"]
+            title = c["name"]
+            stype = "Showdown" if c["is_showdown"] else "Classic"
+            set_status(True, f"Checking pool for {title}...", progress=12, slate_name=title, slate_type=stype)
+            pdf, mdf, topps, act_stype = fetch_player_pool_by_dg(dg, stype)
+            if pdf is not None and not pdf.empty:
+                players_df, matchups_df, team_opponents, actual_slate_type = pdf, mdf, topps, act_stype
+                chosen_contest = c
+                break
+
+        if players_df is None or players_df.empty:
+            set_status(False, "Could not find an active draft group with published salaries.", progress=0)
+            return
+
+        slate_title = chosen_contest["name"]
+        set_status(True, f"Downloaded {len(players_df)} players for {slate_title}...", progress=20, slate_name=slate_title, slate_type=actual_slate_type)
 
         sim_results = run_monte_carlo(players_df, actual_slate_type, team_opponents, num_sims=num_sims)
 
@@ -624,8 +615,8 @@ with st.sidebar:
     slate_selection = st.selectbox(
         "Target Game Window",
         [
-            "Auto-Detect Next Slate",
             "Sunday Main Slate (Classic)",
+            "Auto-Detect Next Slate",
             "Thursday Night Football (Showdown)",
             "Sunday Night Football (Showdown)",
             "Monday Night Football (Showdown)"
